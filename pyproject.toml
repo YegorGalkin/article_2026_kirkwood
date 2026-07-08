@@ -40,3 +40,6 @@ extend-exclude = ["src/kirkwood_article/sim/numba_sim_normal.py"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+  "slow: long-running statistical regression tests",
+]
