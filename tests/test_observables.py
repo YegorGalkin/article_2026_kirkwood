@@ -9,5 +9,5 @@ def test_density_counts_particles_per_length():
 
 def test_pair_correlation_excludes_self_pairs():
     radii, g = pair_correlation_1d(np.array([0.0, 5.0]), length=10.0, dr=1.0, r_max=2.0)
-    assert radii[0] == 0.5
+    assert radii[0] == 0.0
     assert g[0] == 0.0

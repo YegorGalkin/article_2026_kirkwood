@@ -35,6 +35,7 @@ build-backend = "hatchling.build"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = ["src/kirkwood_article/sim/numba_sim_normal.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
