@@ -516,7 +516,6 @@ def save_summary_plot(output_dir: Path, plot_path: Path | None = None) -> Path:
     observed = np.asarray(analysis["observed"], dtype=float)
     expected = np.asarray(analysis["expected"], dtype=float)
     ci_half_width = np.asarray(analysis["ci_half_width"], dtype=float)
-    standard_errors = np.asarray(analysis["standard_errors"], dtype=float)
     residuals = np.asarray(analysis["residuals"], dtype=float)
     linear = analysis["linear"]
     quadratic = analysis["quadratic"]
@@ -545,7 +544,10 @@ def save_summary_plot(output_dir: Path, plot_path: Path | None = None) -> Path:
         label="zero-intercept linear bias fit",
     )
     density_ax.set_ylabel("density")
-    density_ax.set_title("Adaptive d-scaling density summary")
+    density_ax.set_title(
+        "Adaptive d-scaling density summary\n"
+        f"linear density residual coefficient = {linear_coefficient:.3g}"
+    )
     density_ax.grid(True, alpha=0.25)
     density_ax.legend(loc="best")
 
@@ -565,14 +567,6 @@ def save_summary_plot(output_dir: Path, plot_path: Path | None = None) -> Path:
         color="tab:orange",
         label="zero-intercept linear fit",
     )
-    for d_value, standard_error in zip(d_values, standard_errors, strict=True):
-        if not np.isfinite(standard_error) or standard_error <= 0:
-            continue
-        y_grid = np.linspace(-3.0 * standard_error, 3.0 * standard_error, 121)
-        pdf = stats.norm.pdf(y_grid, loc=0.0, scale=standard_error)
-        width = 0.003 * pdf / pdf.max()
-        residual_ax.plot(d_value + width, y_grid, color="0.6", alpha=0.45, linewidth=0.8)
-        residual_ax.plot(d_value - width, y_grid, color="0.6", alpha=0.45, linewidth=0.8)
     residual_ax.set_xlabel("death rate d")
     residual_ax.set_ylabel("density residual")
     residual_ax.grid(True, alpha=0.25)
@@ -615,8 +609,6 @@ def save_convergence_diagnostics_plot(output_dir: Path, plot_path: Path | None =
     measurement_events = np.asarray(
         [int(item.get("measurement_events", item.get("measurement_steps", 0))) for item in summaries]
     )
-    measurement_steps = np.asarray([int(item["measurement_steps"]) for item in summaries])
-
     if plot_path is None:
         plot_path = output_dir / "convergence_diagnostics.png"
     plot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -631,9 +623,8 @@ def save_convergence_diagnostics_plot(output_dir: Path, plot_path: Path | None =
 
     events_ax.plot(d_values, equilibration_events, "o-", label="equilibration events")
     events_ax.plot(d_values, measurement_events, "o-", label="final events")
-    events_ax.plot(d_values, measurement_steps, "o-", label="measurement statistic steps")
     events_ax.set_xlabel("death rate d")
-    events_ax.set_ylabel("simulation steps / events")
+    events_ax.set_ylabel("events")
     events_ax.grid(True, alpha=0.25)
     events_ax.legend(loc="best")
     fig.tight_layout()
