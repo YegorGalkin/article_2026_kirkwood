@@ -30,7 +30,20 @@ class AdaptiveDScalingConfig:
     cell_count: int = 250
     batch_size: int = 5
     effective_sample_count: int = 50
-    density_ci_cutoff: float = 0.01
+    density_ci_cutoff: float = 0.005
+    relative_density_ci_cutoff: float = 0.05
+    alpha_total: float = 0.05
+    min_batches: int = 50
+    look_interval_batches: int = 5
+    min_batch_size: int = 5
+    measurement_check_interval_steps: int = 25
+    tau_safety_factor: float = 5.0
+    autocorr_window_size: int = 1000
+    warmup_consecutive_windows: int = 2
+    warmup_window_batches: int = 50
+    warmup_check_interval_steps: int = 50
+    warmup_slope_tol: float = 0.01
+    warmup_gap_tol: float = 0.002
     max_equilibration_steps: int = 20_000
     max_measurement_steps: int = 50_000
     coordinate_stride: int = 1
@@ -89,6 +102,126 @@ def _batch_mean_ci(samples: list[float], batch_size: int) -> tuple[float, float,
     mean, se = mean_and_se(batches)
     half_width = float(stats.t.ppf(0.975, len(batches) - 1) * se)
     return float(mean), half_width, len(batches)
+
+
+def _autocorr_time(values: list[float] | np.ndarray) -> float:
+    """Estimate integrated autocorrelation time for a scalar chain."""
+
+    series = np.asarray(values, dtype=float)
+    n = len(series)
+    if n < 4:
+        return 1.0
+    centered = series - float(np.mean(series))
+    variance = float(np.dot(centered, centered) / n)
+    if not np.isfinite(variance) or variance <= 0.0:
+        return 1.0
+    max_lag = min(n // 2, 200)
+    tau = 1.0
+    previous_pair_sum = np.inf
+    for lag in range(1, max_lag + 1, 2):
+        corr_1 = float(np.dot(centered[:-lag], centered[lag:]) / ((n - lag) * variance))
+        if lag + 1 <= max_lag:
+            corr_2 = float(
+                np.dot(centered[: -(lag + 1)], centered[lag + 1 :])
+                / ((n - lag - 1) * variance)
+            )
+        else:
+            corr_2 = 0.0
+        pair_sum = corr_1 + corr_2
+        if not np.isfinite(pair_sum) or pair_sum <= 0.0:
+            break
+        pair_sum = min(pair_sum, previous_pair_sum)
+        tau += 2.0 * pair_sum
+        previous_pair_sum = pair_sum
+    return float(max(tau, 1.0))
+
+
+def _autocorr_batch_len(values: list[float] | np.ndarray, config: AdaptiveDScalingConfig) -> tuple[int, float]:
+    """Choose a batch length safely larger than the estimated autocorrelation time."""
+
+    recent_values = np.asarray(values, dtype=float)[-config.autocorr_window_size :]
+    tau_int = _autocorr_time(recent_values)
+    batch_len = max(config.min_batch_size, int(np.ceil(config.tau_safety_factor * tau_int)))
+    return batch_len, tau_int
+
+
+def _autocorr_corrected_mean_ci(
+    samples: list[float],
+    config: AdaptiveDScalingConfig,
+    look_index: int,
+) -> dict[str, float | int]:
+    """Return an autocorrelation-corrected mean and sequential CI diagnostics."""
+
+    batch_len, tau_int = _autocorr_batch_len(samples, config)
+    batches = batch_mean(np.asarray(samples, dtype=float), batch_len)
+    n_batches = len(batches)
+    if n_batches < 2:
+        return {
+            "mean_density": float(np.mean(samples)) if samples else float("nan"),
+            "mcse": float("inf"),
+            "density_ci_half_width": float("inf"),
+            "tau_int": tau_int,
+            "n_eff": 0.0,
+            "batch_len": batch_len,
+            "batch_count": n_batches,
+            "look_index": look_index,
+            "alpha_at_look": float("nan"),
+        }
+    mean, mcse = mean_and_se(batches)
+    alpha_at_look = _alpha_for_look(config.alpha_total, look_index)
+    half_width = float(stats.t.ppf(1.0 - alpha_at_look / 2.0, n_batches - 1) * mcse)
+    return {
+        "mean_density": float(mean),
+        "mcse": float(mcse),
+        "density_ci_half_width": half_width,
+        "tau_int": float(tau_int),
+        "n_eff": float(len(samples) / tau_int),
+        "batch_len": int(batch_len),
+        "batch_count": int(n_batches),
+        "look_index": int(look_index),
+        "alpha_at_look": float(alpha_at_look),
+    }
+
+
+def _alpha_for_look(alpha_total: float, look_index: int) -> float:
+    """Conservative alpha spending sequence for repeated interim looks."""
+
+    if look_index <= 0:
+        raise ValueError("look_index must be positive")
+    return float(alpha_total / (look_index * (look_index + 1)))
+
+
+def _density_stop_reached(diagnostics: dict[str, float | int], config: AdaptiveDScalingConfig) -> bool:
+    """Return whether a sequential density stopping boundary is satisfied."""
+
+    mean_density = abs(float(diagnostics["mean_density"]))
+    half_width = float(diagnostics["density_ci_half_width"])
+    absolute_ok = half_width <= config.density_ci_cutoff
+    relative_ok = mean_density > 0.0 and half_width <= config.relative_density_ci_cutoff * mean_density
+    return bool(absolute_ok or relative_ok)
+
+
+def _chains_statistically_compatible(
+    lower_densities: list[float], upper_densities: list[float], config: AdaptiveDScalingConfig
+) -> bool:
+    """Return whether lower/upper chains have met within autocorrelation-sized windows."""
+
+    lower_batch_len, _ = _autocorr_batch_len(lower_densities, config)
+    upper_batch_len, _ = _autocorr_batch_len(upper_densities, config)
+    batch_len = max(lower_batch_len, upper_batch_len)
+    lower_batches = batch_mean(np.asarray(lower_densities), batch_len)
+    upper_batches = batch_mean(np.asarray(upper_densities), batch_len)
+    window_len = max(config.look_interval_batches, 3)
+    if len(lower_batches) < window_len or len(upper_batches) < window_len:
+        return False
+    lower_window = lower_batches[-window_len:]
+    upper_window = upper_batches[-window_len:]
+    lower_mean, lower_se = mean_and_se(lower_window)
+    upper_mean, upper_se = mean_and_se(upper_window)
+    tcrit = stats.t.ppf(0.975, window_len - 1)
+    chain_gap = abs(float(lower_mean) - float(upper_mean))
+    chain_gap_se = float(np.sqrt(lower_se**2 + upper_se**2))
+    return bool(chain_gap <= config.warmup_gap_tol + tcrit * chain_gap_se)
 
 
 def _ci_half_width_to_se(half_width: np.ndarray, batch_count: np.ndarray) -> np.ndarray:
@@ -156,15 +289,38 @@ def _weighted_zero_bias_fit(
 def _equilibrium_reached(
     lower_densities: list[float], upper_densities: list[float], config: AdaptiveDScalingConfig
 ) -> bool:
-    if len(lower_densities) < config.batch_size * config.effective_sample_count:
+    min_samples = config.min_batch_size * config.min_batches * config.warmup_consecutive_windows
+    if len(lower_densities) < min_samples or len(upper_densities) < min_samples:
         return False
-    lower_batches = batch_mean(np.asarray(lower_densities), config.batch_size)
-    upper_batches = batch_mean(np.asarray(upper_densities), config.batch_size)
-    if len(lower_batches) < config.effective_sample_count or len(upper_batches) < config.effective_sample_count:
+    lower_batch_len, lower_tau = _autocorr_batch_len(lower_densities, config)
+    upper_batch_len, upper_tau = _autocorr_batch_len(upper_densities, config)
+    batch_len = max(lower_batch_len, upper_batch_len)
+    lower_batches = batch_mean(np.asarray(lower_densities), batch_len)
+    upper_batches = batch_mean(np.asarray(upper_densities), batch_len)
+    window_len = config.warmup_window_batches
+    required_batches = config.warmup_consecutive_windows * window_len
+    if len(lower_batches) < required_batches or len(upper_batches) < required_batches:
         return False
-    return _has_zero_trend_at_95_percent(lower_batches[-config.effective_sample_count :]) and _has_zero_trend_at_95_percent(
-        upper_batches[-config.effective_sample_count :]
-    )
+    if not np.isfinite(lower_tau) or not np.isfinite(upper_tau):
+        return False
+
+    for window_index in range(config.warmup_consecutive_windows):
+        end = len(lower_batches) - window_index * window_len
+        start = end - window_len
+        lower_window = lower_batches[start:end]
+        upper_window = upper_batches[start:end]
+        lower_mean, lower_se = mean_and_se(lower_window)
+        upper_mean, upper_se = mean_and_se(upper_window)
+        tcrit = stats.t.ppf(0.975, max(window_len - 1, 1))
+        chain_gap = abs(float(lower_mean) - float(upper_mean))
+        chain_gap_se = float(np.sqrt(lower_se**2 + upper_se**2))
+        gap_ok = chain_gap <= config.warmup_gap_tol + tcrit * chain_gap_se
+        trend_ok = _has_zero_trend_at_95_percent(
+            lower_window, config.warmup_slope_tol
+        ) and _has_zero_trend_at_95_percent(upper_window, config.warmup_slope_tol)
+        if not (gap_ok and trend_ok):
+            return False
+    return True
 
 
 class CoordinateTraceWriter:
@@ -225,18 +381,41 @@ def run_d_value(
 
         if lower_density >= upper_density:
             intersected = True
-        if intersected and _equilibrium_reached(lower_densities, upper_densities, config):
+        is_warmup_look = step % config.warmup_check_interval_steps == 0
+        if not intersected and is_warmup_look:
+            intersected = _chains_statistically_compatible(lower_densities, upper_densities, config)
+        if intersected and is_warmup_look and _equilibrium_reached(lower_densities, upper_densities, config):
             break
     else:
         raise TimeoutError(f"d={d_value:.2f} did not equilibrate in {config.max_equilibration_steps} steps")
 
+    equilibration_time = float(lower_state.time)
+    equilibration_events = int(lower_state.events)
     measurement_densities: list[float] = []
+    look_index = 0
+    last_look_batch_count = 0
     for measurement_step in range(1, config.max_measurement_steps + 1):
         positions = _statistics_step(lower_state)
         measurement_densities.append(_density(positions, config.length))
         writer.write("measurement", measurement_step, lower_state, positions)
-        mean_density, half_width, n_batches = _batch_mean_ci(measurement_densities, config.batch_size)
-        if n_batches >= config.effective_sample_count and half_width <= config.density_ci_cutoff:
+        if (
+            measurement_step < config.min_batch_size * config.min_batches
+            or measurement_step % config.measurement_check_interval_steps != 0
+        ):
+            continue
+        batch_len, _ = _autocorr_batch_len(measurement_densities, config)
+        n_batches = len(batch_mean(np.asarray(measurement_densities, dtype=float), batch_len))
+        is_new_look = (
+            n_batches >= config.min_batches
+            and n_batches % config.look_interval_batches == 0
+            and n_batches != last_look_batch_count
+        )
+        if not is_new_look:
+            continue
+        look_index += 1
+        last_look_batch_count = n_batches
+        diagnostics = _autocorr_corrected_mean_ci(measurement_densities, config, look_index)
+        if _density_stop_reached(diagnostics, config):
             elapsed = time.monotonic() - started_at
             summary = {
                 "d": float(d_value),
@@ -244,11 +423,22 @@ def run_d_value(
                 "mean_field_density": float(mf_density),
                 "mean_field_population": int(mf_population),
                 "equilibration_steps": int(step),
+                "equilibration_time": equilibration_time,
+                "equilibration_events": equilibration_events,
                 "measurement_steps": int(measurement_step),
-                "density_mean": float(mean_density),
-                "density_ci_half_width": float(half_width),
+                "measurement_time": float(lower_state.time),
+                "measurement_events": int(lower_state.events),
+                "density_mean": float(diagnostics["mean_density"]),
+                "density_ci_half_width": float(diagnostics["density_ci_half_width"]),
                 "density_ci_cutoff": float(config.density_ci_cutoff),
-                "batch_count": int(n_batches),
+                "relative_density_ci_cutoff": float(config.relative_density_ci_cutoff),
+                "mcse": float(diagnostics["mcse"]),
+                "tau_int": float(diagnostics["tau_int"]),
+                "n_eff": float(diagnostics["n_eff"]),
+                "batch_len": int(diagnostics["batch_len"]),
+                "batch_count": int(diagnostics["batch_count"]),
+                "look_index": int(diagnostics["look_index"]),
+                "alpha_at_look": float(diagnostics["alpha_at_look"]),
                 "intersected": bool(intersected),
                 "restarted_lower": bool(restarted_lower),
                 "elapsed_seconds": float(elapsed),
@@ -410,6 +600,48 @@ def save_summary_plot(output_dir: Path, plot_path: Path | None = None) -> Path:
     return plot_path
 
 
+def save_convergence_diagnostics_plot(output_dir: Path, plot_path: Path | None = None) -> Path:
+    """Save convergence time and event-count diagnostics over the ``d`` grid."""
+
+    summaries = sorted(load_run_summaries(output_dir), key=lambda item: float(item["d"]))
+    d_values = np.asarray([float(item["d"]) for item in summaries], dtype=float)
+    equilibration_time = np.asarray(
+        [float(item.get("equilibration_time", np.nan)) for item in summaries]
+    )
+    measurement_time = np.asarray([float(item.get("measurement_time", np.nan)) for item in summaries])
+    equilibration_events = np.asarray(
+        [int(item.get("equilibration_events", item.get("equilibration_steps", 0))) for item in summaries]
+    )
+    measurement_events = np.asarray(
+        [int(item.get("measurement_events", item.get("measurement_steps", 0))) for item in summaries]
+    )
+    measurement_steps = np.asarray([int(item["measurement_steps"]) for item in summaries])
+
+    if plot_path is None:
+        plot_path = output_dir / "convergence_diagnostics.png"
+    plot_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, (time_ax, events_ax) = plt.subplots(2, 1, figsize=(8, 7), sharex=True)
+    time_ax.plot(d_values, equilibration_time, "o-", label="equilibration simulation time")
+    time_ax.plot(d_values, measurement_time, "o-", label="final simulation time")
+    time_ax.set_ylabel("simulation time")
+    time_ax.set_title("Adaptive d-scaling convergence diagnostics")
+    time_ax.grid(True, alpha=0.25)
+    time_ax.legend(loc="best")
+
+    events_ax.plot(d_values, equilibration_events, "o-", label="equilibration events")
+    events_ax.plot(d_values, measurement_events, "o-", label="final events")
+    events_ax.plot(d_values, measurement_steps, "o-", label="measurement statistic steps")
+    events_ax.set_xlabel("death rate d")
+    events_ax.set_ylabel("simulation steps / events")
+    events_ax.grid(True, alpha=0.25)
+    events_ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(plot_path, dpi=200)
+    plt.close(fig)
+    return plot_path
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=Path("results/adaptive_d_scaling"))
@@ -423,11 +655,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-measurement-steps", type=int, default=AdaptiveDScalingConfig.max_measurement_steps)
     parser.add_argument("--coordinate-stride", type=int, default=AdaptiveDScalingConfig.coordinate_stride)
     parser.add_argument("--summary-plot", type=Path, default=None)
+    parser.add_argument("--convergence-plot", type=Path, default=None)
     parser.add_argument("--summary-plot-only", action="store_true")
     args = parser.parse_args(argv)
 
     if args.summary_plot_only:
         save_summary_plot(args.output_dir, args.summary_plot)
+        save_convergence_diagnostics_plot(args.output_dir, args.convergence_plot)
         return
 
     if args.only_d is None:
@@ -444,6 +678,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     run_scaling_grid(config, args.output_dir)
     save_summary_plot(args.output_dir, args.summary_plot)
+    save_convergence_diagnostics_plot(args.output_dir, args.convergence_plot)
 
 
 if __name__ == "__main__":

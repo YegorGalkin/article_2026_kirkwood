@@ -30,8 +30,10 @@ for the grid `d = 0.00, 0.01, ..., 0.10`, with the default article parameters
 `b = 1`, `d' = 1`, standard-normal birth/death kernels, and area length `1000`.
 Each `d` value uses paired low/high starts, waits for the population traces to
 intersect, checks that recent batch means have no detectable trend, and then
-collects density samples until the 95% confidence interval half-width is at most
-`0.01`.
+collects density samples with autocorrelation-corrected batch means. Sequential
+stopping is evaluated only at planned alpha-spending looks and stops when the
+95% confidence interval half-width is either below `0.005` in absolute density
+or within `±5%` of the observed mean density.
 
 Run the full grid with:
 
@@ -45,8 +47,8 @@ For a faster smoke test on the quickest grid point:
 uv run run-adaptive-d-scaling \
   --only-d 0.1 \
   --output-dir results/adaptive_d_scaling_d01_smoke \
-  --max-equilibration-steps 5000 \
-  --max-measurement-steps 2000
+  --max-equilibration-steps 10000 \
+  --max-measurement-steps 15000
 ```
 
 Outputs are written under the selected `results/` subdirectory:
@@ -63,6 +65,8 @@ Outputs are written under the selected `results/` subdirectory:
 - `density_scaling_regression.json` records the zero-bias linear and quadratic
   residual regressions, including whether the quadratic term is significant at
   the 95% level.
+- `convergence_diagnostics.png` plots final/equilibration simulation time and
+  event-count diagnostics against `d`.
 
 To regenerate only the summary plot and regression JSON from an existing output
 directory:
