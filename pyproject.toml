@@ -26,6 +26,7 @@ dev = [
 
 [project.scripts]
 run-scaling = "kirkwood_article.experiments.scaling:main"
+run-adaptive-d-scaling = "kirkwood_article.experiments.adaptive_d_scaling:main"
 make-figures = "kirkwood_article.plotting.figures:main"
 
 [build-system]
