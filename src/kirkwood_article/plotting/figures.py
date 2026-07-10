@@ -40,7 +40,7 @@ def plot_scaling(results_path: Path, output: Path) -> None:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results", type=Path)
-    parser.add_argument("--output", type=Path, default=Path("article/figures/scaling.png"))
+    parser.add_argument("--output", type=Path, default=Path("data/figures/scaling.png"))
     args = parser.parse_args(argv)
     plot_scaling(args.results, args.output)
 
