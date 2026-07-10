@@ -677,6 +677,40 @@ def _weighted_polyfit_with_ci(
     }
 
 
+def _weighted_zero_intercept_polyfit_with_ci(
+    x_values: np.ndarray, y_values: np.ndarray, y_se: np.ndarray, degree: int
+) -> dict[str, object]:
+    """Fit weighted zero-intercept polynomial with powers 1..degree."""
+
+    if degree < 1:
+        raise ValueError("degree must be at least 1 for zero-intercept polynomial fits")
+    finite = np.isfinite(x_values) & np.isfinite(y_values) & np.isfinite(y_se) & (y_se > 0.0)
+    x = x_values[finite]
+    y = y_values[finite]
+    se = y_se[finite]
+    design = np.vstack([x**power for power in range(1, degree + 1)]).T
+    weights = 1.0 / np.square(se)
+    xtw = design.T * weights
+    xtwx = xtw @ design
+    xtwy = xtw @ y
+    coefficients = np.linalg.solve(xtwx, xtwy)
+    residuals = y - design @ coefficients
+    dof = max(len(y) - design.shape[1], 1)
+    chi_square = float(np.sum(weights * np.square(residuals)))
+    scale = max(chi_square / dof, 1.0)
+    covariance = np.linalg.inv(xtwx) * scale
+    se_coefficients = np.sqrt(np.diag(covariance))
+    tcrit = stats.t.ppf(0.975, dof)
+    return {
+        "coefficients": coefficients,
+        "covariance": covariance,
+        "standard_errors": se_coefficients,
+        "ci_half_width": tcrit * se_coefficients,
+        "chi_square": chi_square,
+        "dof": int(dof),
+    }
+
+
 def _fit_exponential_pcfs(
     radii: np.ndarray,
     pcf_excess_mean: np.ndarray,
@@ -749,10 +783,18 @@ def _test_pcf_fit_hypotheses(
     lambda_t = lambda_slope / lambda_slope_se if lambda_slope_se > 0.0 else np.nan
     lambda_p = float(2.0 * stats.t.sf(abs(lambda_t), int(lambda_linear["dof"])))
 
-    amplitude_linear = _weighted_polyfit_with_ci(d_values, amplitude, amplitude_se, degree=1)
-    amplitude_quadratic = _weighted_polyfit_with_ci(d_values, amplitude, amplitude_se, degree=2)
-    quad = float(amplitude_quadratic["coefficients"][2])
-    quad_se = float(amplitude_quadratic["standard_errors"][2])
+    amplitude_analysis_mask = d_values > 0.0
+    amplitude_d_values = d_values[amplitude_analysis_mask]
+    amplitude_values = amplitude[amplitude_analysis_mask]
+    amplitude_standard_errors = amplitude_se[amplitude_analysis_mask]
+    amplitude_linear = _weighted_zero_intercept_polyfit_with_ci(
+        amplitude_d_values, amplitude_values, amplitude_standard_errors, degree=1
+    )
+    amplitude_quadratic = _weighted_zero_intercept_polyfit_with_ci(
+        amplitude_d_values, amplitude_values, amplitude_standard_errors, degree=2
+    )
+    quad = float(amplitude_quadratic["coefficients"][1])
+    quad_se = float(amplitude_quadratic["standard_errors"][1])
     quad_t = quad / quad_se if quad_se > 0.0 else np.nan
     quad_p = float(2.0 * stats.t.sf(abs(quad_t), int(amplitude_quadratic["dof"])))
     return {
@@ -760,6 +802,8 @@ def _test_pcf_fit_hypotheses(
         "lambda_linear": lambda_linear,
         "lambda_slope_p_value": lambda_p,
         "lambda_constant_not_rejected_95_percent": bool(lambda_p >= 0.05),
+        "amplitude_analysis_mask": amplitude_analysis_mask,
+        "amplitude_analysis_d_values": amplitude_d_values,
         "amplitude_linear": amplitude_linear,
         "amplitude_quadratic": amplitude_quadratic,
         "amplitude_quadratic_p_value": quad_p,
@@ -914,9 +958,13 @@ def save_pcf_fit_parameter_plot(output_dir: Path, plot_path: Path | None = None)
     d_grid = np.linspace(float(np.min(d_values)), float(np.max(d_values)), 200)
     lambda_const = float(tests["lambda_constant"]["coefficients"][0])
     lambda_band = float(tests["lambda_constant"]["ci_half_width"][0])
+    amplitude_analysis_d_values = np.asarray(tests["amplitude_analysis_d_values"], dtype=float)
+    amp_grid = np.linspace(
+        float(np.min(amplitude_analysis_d_values)), float(np.max(amplitude_analysis_d_values)), 200
+    )
     amp_coef = np.asarray(tests["amplitude_linear"]["coefficients"], dtype=float)
     amp_cov = np.asarray(tests["amplitude_linear"]["covariance"], dtype=float)
-    design = np.vstack([np.ones_like(d_grid), d_grid]).T
+    design = amp_grid[:, np.newaxis]
     amp_line = design @ amp_coef
     amp_band = stats.t.ppf(0.975, int(tests["amplitude_linear"]["dof"])) * np.sqrt(
         np.sum((design @ amp_cov) * design, axis=1)
@@ -935,13 +983,15 @@ def save_pcf_fit_parameter_plot(output_dir: Path, plot_path: Path | None = None)
     lambda_ax.set_title(f"constant lambda p = {float(tests['lambda_slope_p_value']):.3g}")
     lambda_ax.grid(True, alpha=0.25)
     amp_ax.errorbar(d_values, amplitude, yerr=1.96 * amplitude_se, fmt="o", capsize=3)
-    amp_ax.plot(d_grid, amp_line, color="tab:orange")
+    amp_ax.plot(amp_grid, amp_line, color="tab:orange")
     amp_ax.fill_between(
-        d_grid, amp_line - amp_band, amp_line + amp_band, color="tab:orange", alpha=0.2
+        amp_grid, amp_line - amp_band, amp_line + amp_band, color="tab:orange", alpha=0.2
     )
     amp_ax.set_xlabel("death rate d")
     amp_ax.set_ylabel("A")
-    amp_ax.set_title(f"linear A(d) quadratic p = {float(tests['amplitude_quadratic_p_value']):.3g}")
+    amp_ax.set_title(
+        f"zero-intercept linear A(d), d>0 quadratic p = {float(tests['amplitude_quadratic_p_value']):.3g}"
+    )
     amp_ax.grid(True, alpha=0.25)
     fig.tight_layout()
     fig.savefig(plot_path, dpi=200)

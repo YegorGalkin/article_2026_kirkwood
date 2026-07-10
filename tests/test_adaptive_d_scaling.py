@@ -106,7 +106,7 @@ def test_pointwise_pcf_ci_and_exponential_fit_exclude_zero_bin() -> None:
     pcf_by_d = []
     mcse_by_d = []
     for d_value in d_values:
-        amplitude = 0.2 + 0.5 * d_value
+        amplitude = 2.0 * d_value
         lambda_value = 0.8
         expected = amplitude * np.exp(-lambda_value * radii)
         expected[0] = 99.0
@@ -120,8 +120,10 @@ def test_pointwise_pcf_ci_and_exponential_fit_exclude_zero_bin() -> None:
         d_values, fits["amplitude"], fits["amplitude_se"], fits["lambda"], fits["lambda_se"]
     )
 
-    assert np.allclose(fits["lambda"], 0.8, atol=1e-2)
-    assert np.allclose(fits["amplitude"], 0.2 + 0.5 * d_values, atol=1e-2)
+    assert np.allclose(fits["lambda"][d_values > 0.0], 0.8, atol=1e-2)
+    assert np.allclose(fits["amplitude"], 2.0 * d_values, atol=1e-2)
     assert fits["fitted_pcf_excess"][0, 0] != 99.0
     assert "lambda_slope_p_value" in tests
     assert "amplitude_quadratic_p_value" in tests
+    assert np.array_equal(tests["amplitude_analysis_mask"], np.asarray([False, True, True]))
+    assert np.allclose(tests["amplitude_linear"]["coefficients"], [2.0], atol=1e-2)
