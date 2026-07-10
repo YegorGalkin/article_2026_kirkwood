@@ -91,3 +91,37 @@ def test_summary_and_convergence_plots_write_outputs(tmp_path) -> None:
     assert plot_path.exists()
     assert convergence_path.exists()
     assert (tmp_path / "density_scaling_regression.json").exists()
+
+
+def test_pointwise_pcf_ci_and_exponential_fit_exclude_zero_bin() -> None:
+    from kirkwood_article.experiments.adaptive_d_scaling import (
+        _fit_exponential_pcfs,
+        _pointwise_autocorr_corrected_mean_ci,
+        _test_pcf_fit_hypotheses,
+    )
+
+    config = AdaptiveDScalingConfig(min_batch_size=2, tau_safety_factor=1.0)
+    radii = np.round(np.arange(0.0, 5.0 + 0.05, 0.1), 10)
+    d_values = np.asarray([0.0, 0.05, 0.1], dtype=float)
+    pcf_by_d = []
+    mcse_by_d = []
+    for d_value in d_values:
+        amplitude = 0.2 + 0.5 * d_value
+        lambda_value = 0.8
+        expected = amplitude * np.exp(-lambda_value * radii)
+        expected[0] = 99.0
+        samples = np.vstack([expected + 0.001 * ((-1) ** i) for i in range(20)])
+        ci = _pointwise_autocorr_corrected_mean_ci(samples, config)
+        pcf_by_d.append(ci["mean"])
+        mcse_by_d.append(np.maximum(ci["mcse"], 1e-3))
+
+    fits = _fit_exponential_pcfs(radii, np.vstack(pcf_by_d), np.vstack(mcse_by_d))
+    tests = _test_pcf_fit_hypotheses(
+        d_values, fits["amplitude"], fits["amplitude_se"], fits["lambda"], fits["lambda_se"]
+    )
+
+    assert np.allclose(fits["lambda"], 0.8, atol=1e-2)
+    assert np.allclose(fits["amplitude"], 0.2 + 0.5 * d_values, atol=1e-2)
+    assert fits["fitted_pcf_excess"][0, 0] != 99.0
+    assert "lambda_slope_p_value" in tests
+    assert "amplitude_quadratic_p_value" in tests

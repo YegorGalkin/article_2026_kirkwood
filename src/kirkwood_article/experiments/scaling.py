@@ -119,7 +119,7 @@ def save_results(results: dict[str, np.ndarray], output: Path) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=Path("results/minimal_scaling.npz"))
+    parser.add_argument("--output", type=Path, default=Path("data/minimal_scaling.npz"))
     args = parser.parse_args(argv)
     save_results(run_scaling_grid(ScalingConfig()), args.output)
 
