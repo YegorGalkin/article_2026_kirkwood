@@ -10,16 +10,25 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy import stats
+from scipy import optimize, stats
 
 from kirkwood_article.analysis.density_bias import (
     analyze_density_bias,
     ci_half_width_to_se as _ci_half_width_to_se,
     weighted_zero_bias_fit as _weighted_zero_bias_fit,
 )
-from kirkwood_article.io.coordinate_traces import CoordinateTraceWriter
-from kirkwood_article.sim.ssa_1d import SSAParams, SSAState, get_positions_1d, initialize, run_events
+from kirkwood_article.io.coordinate_traces import CoordinateTraceWriter, iter_coordinate_shards
+from kirkwood_article.sim.observables import pair_correlation_fft_1d
+from kirkwood_article.sim.ssa_1d import (
+    SSAParams,
+    SSAState,
+    get_positions_1d,
+    initialize,
+    run_events,
+)
 from kirkwood_article.stats.batch_means import batch_mean, mean_and_se
+
+DEFAULT_DATA_DIR = Path("data")
 
 __all__ = [
     "AdaptiveDScalingConfig",
@@ -30,6 +39,9 @@ __all__ = [
     "save_convergence_diagnostics_plot",
     "save_summary_plot",
     "_ci_half_width_to_se",
+    "save_pcf_fit_parameter_plot",
+    "save_pcf_grid_plot",
+    "save_pcf_posthoc_analysis",
     "_weighted_zero_bias_fit",
 ]
 
@@ -86,7 +98,9 @@ def _params_for_d(config: AdaptiveDScalingConfig, d_value: float, seed: int) -> 
     )
 
 
-def _make_state(config: AdaptiveDScalingConfig, d_value: float, seed: int, initial_population: int) -> SSAState:
+def _make_state(
+    config: AdaptiveDScalingConfig, d_value: float, seed: int, initial_population: int
+) -> SSAState:
     return initialize(_params_for_d(config, d_value, seed), initial_population=initial_population)
 
 
@@ -140,8 +154,7 @@ def _autocorr_time(values: list[float] | np.ndarray) -> float:
         corr_1 = float(np.dot(centered[:-lag], centered[lag:]) / ((n - lag) * variance))
         if lag + 1 <= max_lag:
             corr_2 = float(
-                np.dot(centered[: -(lag + 1)], centered[lag + 1 :])
-                / ((n - lag - 1) * variance)
+                np.dot(centered[: -(lag + 1)], centered[lag + 1 :]) / ((n - lag - 1) * variance)
             )
         else:
             corr_2 = 0.0
@@ -154,7 +167,9 @@ def _autocorr_time(values: list[float] | np.ndarray) -> float:
     return float(max(tau, 1.0))
 
 
-def _autocorr_batch_len(values: list[float] | np.ndarray, config: AdaptiveDScalingConfig) -> tuple[int, float]:
+def _autocorr_batch_len(
+    values: list[float] | np.ndarray, config: AdaptiveDScalingConfig
+) -> tuple[int, float]:
     """Choose a batch length safely larger than the estimated autocorrelation time."""
 
     recent_values = np.asarray(values, dtype=float)[-config.autocorr_window_size :]
@@ -209,13 +224,17 @@ def _alpha_for_look(alpha_total: float, look_index: int) -> float:
     return float(alpha_total / (look_index * (look_index + 1)))
 
 
-def _density_stop_reached(diagnostics: dict[str, float | int], config: AdaptiveDScalingConfig) -> bool:
+def _density_stop_reached(
+    diagnostics: dict[str, float | int], config: AdaptiveDScalingConfig
+) -> bool:
     """Return whether a sequential density stopping boundary is satisfied."""
 
     mean_density = abs(float(diagnostics["mean_density"]))
     half_width = float(diagnostics["density_ci_half_width"])
     absolute_ok = half_width <= config.density_ci_cutoff
-    relative_ok = mean_density > 0.0 and half_width <= config.relative_density_ci_cutoff * mean_density
+    relative_ok = (
+        mean_density > 0.0 and half_width <= config.relative_density_ci_cutoff * mean_density
+    )
     return bool(absolute_ok or relative_ok)
 
 
@@ -317,10 +336,16 @@ def run_d_value(
         is_warmup_look = step % config.warmup_check_interval_steps == 0
         if not intersected and is_warmup_look:
             intersected = _chains_statistically_compatible(lower_densities, upper_densities, config)
-        if intersected and is_warmup_look and _equilibrium_reached(lower_densities, upper_densities, config):
+        if (
+            intersected
+            and is_warmup_look
+            and _equilibrium_reached(lower_densities, upper_densities, config)
+        ):
             break
     else:
-        raise TimeoutError(f"d={d_value:.2f} did not equilibrate in {config.max_equilibration_steps} steps")
+        raise TimeoutError(
+            f"d={d_value:.2f} did not equilibrate in {config.max_equilibration_steps} steps"
+        )
 
     equilibration_time = float(lower_state.time)
     equilibration_events = int(lower_state.events)
@@ -376,14 +401,20 @@ def run_d_value(
                 "restarted_lower": bool(restarted_lower),
                 "elapsed_seconds": float(elapsed),
             }
-            with (output_dir / f"d_{d_value:.2f}" / "summary.json").open("w", encoding="utf-8") as fh:
+            with (output_dir / f"d_{d_value:.2f}" / "summary.json").open(
+                "w", encoding="utf-8"
+            ) as fh:
                 json.dump(summary, fh, indent=2, sort_keys=True)
             return summary
 
-    raise TimeoutError(f"d={d_value:.2f} did not reach CI cutoff in {config.max_measurement_steps} samples")
+    raise TimeoutError(
+        f"d={d_value:.2f} did not reach CI cutoff in {config.max_measurement_steps} samples"
+    )
 
 
-def run_scaling_grid(config: AdaptiveDScalingConfig, output_dir: Path) -> list[dict[str, float | int | bool]]:
+def run_scaling_grid(
+    config: AdaptiveDScalingConfig, output_dir: Path
+) -> list[dict[str, float | int | bool]]:
     """Run all configured death-rate values and write aggregate metadata."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -508,12 +539,20 @@ def save_convergence_diagnostics_plot(output_dir: Path, plot_path: Path | None =
     equilibration_time = np.asarray(
         [float(item.get("equilibration_time", np.nan)) for item in summaries]
     )
-    measurement_time = np.asarray([float(item.get("measurement_time", np.nan)) for item in summaries])
+    measurement_time = np.asarray(
+        [float(item.get("measurement_time", np.nan)) for item in summaries]
+    )
     equilibration_events = np.asarray(
-        [int(item.get("equilibration_events", item.get("equilibration_steps", 0))) for item in summaries]
+        [
+            int(item.get("equilibration_events", item.get("equilibration_steps", 0)))
+            for item in summaries
+        ]
     )
     measurement_events = np.asarray(
-        [int(item.get("measurement_events", item.get("measurement_steps", 0))) for item in summaries]
+        [
+            int(item.get("measurement_events", item.get("measurement_steps", 0)))
+            for item in summaries
+        ]
     )
     if plot_path is None:
         plot_path = output_dir / "convergence_diagnostics.png"
@@ -539,22 +578,458 @@ def save_convergence_diagnostics_plot(output_dir: Path, plot_path: Path | None =
     return plot_path
 
 
+def _load_output_metadata(
+    output_dir: Path,
+) -> tuple[list[dict[str, float | int | bool]], dict[str, object]]:
+    """Load aggregate summaries plus optional config metadata."""
+
+    summary_path = output_dir / "summary.json"
+    if summary_path.exists():
+        with summary_path.open(encoding="utf-8") as fh:
+            payload = json.load(fh)
+        return list(payload["runs"]), dict(payload.get("config", {}))
+    return load_run_summaries(output_dir), {}
+
+
+def _pointwise_autocorr_corrected_mean_ci(
+    samples: np.ndarray, config: AdaptiveDScalingConfig
+) -> dict[str, np.ndarray]:
+    """Return point-wise autocorrelation-corrected 95% PCF confidence bands."""
+
+    values = np.asarray(samples, dtype=float)
+    if values.ndim != 2:
+        raise ValueError("samples must have shape (time, radius)")
+    n_radii = values.shape[1]
+    mean = np.full(n_radii, np.nan, dtype=float)
+    half_width = np.full(n_radii, np.inf, dtype=float)
+    mcse = np.full(n_radii, np.inf, dtype=float)
+    tau_int = np.full(n_radii, np.nan, dtype=float)
+    n_eff = np.zeros(n_radii, dtype=float)
+    batch_len = np.zeros(n_radii, dtype=int)
+    batch_count = np.zeros(n_radii, dtype=int)
+
+    for radius_index in range(n_radii):
+        column = values[:, radius_index]
+        finite = column[np.isfinite(column)]
+        if finite.size == 0:
+            continue
+        tau = _autocorr_time(finite)
+        batches_len = max(config.min_batch_size, int(np.ceil(config.tau_safety_factor * tau)))
+        batches = batch_mean(finite, batches_len)
+        tau_int[radius_index] = tau
+        n_eff[radius_index] = finite.size / tau
+        batch_len[radius_index] = batches_len
+        batch_count[radius_index] = len(batches)
+        if len(batches) < 2:
+            mean[radius_index] = float(np.mean(finite))
+            continue
+        mean_value, se = mean_and_se(batches)
+        mean[radius_index] = float(mean_value)
+        mcse[radius_index] = float(se)
+        half_width[radius_index] = float(stats.t.ppf(0.975, len(batches) - 1) * se)
+
+    return {
+        "mean": mean,
+        "half_width": half_width,
+        "lower": mean - half_width,
+        "upper": mean + half_width,
+        "mcse": mcse,
+        "tau_int": tau_int,
+        "n_eff": n_eff,
+        "batch_len": batch_len,
+        "batch_count": batch_count,
+    }
+
+
+def _exponential_excess_model(radii: np.ndarray, amplitude: float, lambda_: float) -> np.ndarray:
+    return amplitude * np.exp(-lambda_ * radii)
+
+
+def _weighted_polyfit_with_ci(
+    x_values: np.ndarray, y_values: np.ndarray, y_se: np.ndarray, degree: int
+) -> dict[str, object]:
+    """Fit weighted polynomial and return coefficient covariance diagnostics."""
+
+    finite = np.isfinite(x_values) & np.isfinite(y_values) & np.isfinite(y_se) & (y_se > 0.0)
+    x = x_values[finite]
+    y = y_values[finite]
+    se = y_se[finite]
+    design = np.vstack([x**power for power in range(degree + 1)]).T
+    weights = 1.0 / np.square(se)
+    xtw = design.T * weights
+    xtwx = xtw @ design
+    xtwy = xtw @ y
+    coefficients = np.linalg.solve(xtwx, xtwy)
+    residuals = y - design @ coefficients
+    dof = max(len(y) - design.shape[1], 1)
+    chi_square = float(np.sum(weights * np.square(residuals)))
+    scale = max(chi_square / dof, 1.0)
+    covariance = np.linalg.inv(xtwx) * scale
+    se_coefficients = np.sqrt(np.diag(covariance))
+    tcrit = stats.t.ppf(0.975, dof)
+    return {
+        "coefficients": coefficients,
+        "covariance": covariance,
+        "standard_errors": se_coefficients,
+        "ci_half_width": tcrit * se_coefficients,
+        "chi_square": chi_square,
+        "dof": int(dof),
+    }
+
+
+def _weighted_zero_intercept_polyfit_with_ci(
+    x_values: np.ndarray, y_values: np.ndarray, y_se: np.ndarray, degree: int
+) -> dict[str, object]:
+    """Fit weighted zero-intercept polynomial with powers 1..degree."""
+
+    if degree < 1:
+        raise ValueError("degree must be at least 1 for zero-intercept polynomial fits")
+    finite = np.isfinite(x_values) & np.isfinite(y_values) & np.isfinite(y_se) & (y_se > 0.0)
+    x = x_values[finite]
+    y = y_values[finite]
+    se = y_se[finite]
+    design = np.vstack([x**power for power in range(1, degree + 1)]).T
+    weights = 1.0 / np.square(se)
+    xtw = design.T * weights
+    xtwx = xtw @ design
+    xtwy = xtw @ y
+    coefficients = np.linalg.solve(xtwx, xtwy)
+    residuals = y - design @ coefficients
+    dof = max(len(y) - design.shape[1], 1)
+    chi_square = float(np.sum(weights * np.square(residuals)))
+    scale = max(chi_square / dof, 1.0)
+    covariance = np.linalg.inv(xtwx) * scale
+    se_coefficients = np.sqrt(np.diag(covariance))
+    tcrit = stats.t.ppf(0.975, dof)
+    return {
+        "coefficients": coefficients,
+        "covariance": covariance,
+        "standard_errors": se_coefficients,
+        "ci_half_width": tcrit * se_coefficients,
+        "chi_square": chi_square,
+        "dof": int(dof),
+    }
+
+
+def _fit_exponential_pcfs(
+    radii: np.ndarray,
+    pcf_excess_mean: np.ndarray,
+    pcf_excess_mcse: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Fit PCF - 1 to A exp(-lambda x), excluding the unstable zero bin."""
+
+    d_count = pcf_excess_mean.shape[0]
+    amplitude = np.full(d_count, np.nan, dtype=float)
+    amplitude_se = np.full(d_count, np.nan, dtype=float)
+    lambda_ = np.full(d_count, np.nan, dtype=float)
+    lambda_se = np.full(d_count, np.nan, dtype=float)
+    fitted = np.full_like(pcf_excess_mean, np.nan, dtype=float)
+    fit_mask = radii > 0.0
+
+    for d_index in range(d_count):
+        y = pcf_excess_mean[d_index, fit_mask]
+        sigma = pcf_excess_mcse[d_index, fit_mask]
+        x = radii[fit_mask]
+        finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(sigma) & (sigma > 0.0)
+        if np.count_nonzero(finite) < 3:
+            finite = np.isfinite(x) & np.isfinite(y)
+            sigma_arg = None
+        else:
+            sigma_arg = sigma[finite]
+        if np.count_nonzero(finite) < 3:
+            continue
+        initial_amplitude = float(y[finite][0])
+        initial_lambda = 1.0
+        try:
+            params, covariance = optimize.curve_fit(
+                _exponential_excess_model,
+                x[finite],
+                y[finite],
+                p0=(initial_amplitude, initial_lambda),
+                sigma=sigma_arg,
+                absolute_sigma=sigma_arg is not None,
+                bounds=([-np.inf, 0.0], [np.inf, np.inf]),
+                maxfev=20_000,
+            )
+        except (RuntimeError, ValueError):
+            continue
+        amplitude[d_index], lambda_[d_index] = params
+        errors = np.sqrt(np.diag(covariance))
+        amplitude_se[d_index], lambda_se[d_index] = errors
+        fitted[d_index, :] = _exponential_excess_model(radii, amplitude[d_index], lambda_[d_index])
+
+    return {
+        "amplitude": amplitude,
+        "amplitude_se": amplitude_se,
+        "lambda": lambda_,
+        "lambda_se": lambda_se,
+        "fitted_pcf_excess": fitted,
+    }
+
+
+def _test_pcf_fit_hypotheses(
+    d_values: np.ndarray,
+    amplitude: np.ndarray,
+    amplitude_se: np.ndarray,
+    lambda_: np.ndarray,
+    lambda_se: np.ndarray,
+) -> dict[str, object]:
+    """Test constant lambda(d) and linear A(d) with weighted regressions."""
+
+    lambda_constant = _weighted_polyfit_with_ci(d_values, lambda_, lambda_se, degree=0)
+    lambda_linear = _weighted_polyfit_with_ci(d_values, lambda_, lambda_se, degree=1)
+    lambda_slope = float(lambda_linear["coefficients"][1])
+    lambda_slope_se = float(lambda_linear["standard_errors"][1])
+    lambda_t = lambda_slope / lambda_slope_se if lambda_slope_se > 0.0 else np.nan
+    lambda_p = float(2.0 * stats.t.sf(abs(lambda_t), int(lambda_linear["dof"])))
+
+    amplitude_analysis_mask = d_values > 0.0
+    amplitude_d_values = d_values[amplitude_analysis_mask]
+    amplitude_values = amplitude[amplitude_analysis_mask]
+    amplitude_standard_errors = amplitude_se[amplitude_analysis_mask]
+    amplitude_linear = _weighted_zero_intercept_polyfit_with_ci(
+        amplitude_d_values, amplitude_values, amplitude_standard_errors, degree=1
+    )
+    amplitude_quadratic = _weighted_zero_intercept_polyfit_with_ci(
+        amplitude_d_values, amplitude_values, amplitude_standard_errors, degree=2
+    )
+    quad = float(amplitude_quadratic["coefficients"][1])
+    quad_se = float(amplitude_quadratic["standard_errors"][1])
+    quad_t = quad / quad_se if quad_se > 0.0 else np.nan
+    quad_p = float(2.0 * stats.t.sf(abs(quad_t), int(amplitude_quadratic["dof"])))
+    return {
+        "lambda_constant": lambda_constant,
+        "lambda_linear": lambda_linear,
+        "lambda_slope_p_value": lambda_p,
+        "lambda_constant_not_rejected_95_percent": bool(lambda_p >= 0.05),
+        "amplitude_analysis_mask": amplitude_analysis_mask,
+        "amplitude_analysis_d_values": amplitude_d_values,
+        "amplitude_linear": amplitude_linear,
+        "amplitude_quadratic": amplitude_quadratic,
+        "amplitude_quadratic_p_value": quad_p,
+        "amplitude_linear_not_rejected_95_percent": bool(quad_p >= 0.05),
+    }
+
+
+def _json_ready(value: object) -> object:
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(k): _json_ready(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_ready(v) for v in value]
+    return value
+
+
+def save_pcf_posthoc_analysis(output_dir: Path, dr: float = 0.1, r_max: float = 5.0) -> Path:
+    """Compute post-equilibrium PCF - 1 summaries, fits, and hypothesis tests."""
+
+    summaries, config_payload = _load_output_metadata(output_dir)
+    length = float(config_payload.get("length", AdaptiveDScalingConfig.length))
+    config_kwargs = {
+        k: v for k, v in config_payload.items() if k in AdaptiveDScalingConfig.__dataclass_fields__
+    }
+    config = AdaptiveDScalingConfig(**config_kwargs)
+    target_radii = np.round(np.arange(0.0, r_max + dr / 2.0, dr), 10)
+    sorted_summaries = sorted(summaries, key=lambda item: float(item["d"]))
+
+    d_values = []
+    means = []
+    half_widths = []
+    mcses = []
+    batch_counts = []
+    sample_counts = []
+    for summary in sorted_summaries:
+        d_value = float(summary["d"])
+        samples = []
+        for shard in iter_coordinate_shards(output_dir / f"d_{d_value:.2f}", phase="measurement"):
+            radii, pcf = pair_correlation_fft_1d(shard.positions, length=length, dr=dr, r_max=r_max)
+            pcf_excess = pcf - 1.0
+            if len(radii) != len(target_radii) or not np.allclose(radii, target_radii):
+                finite = np.isfinite(radii) & np.isfinite(pcf_excess)
+                pcf_excess = np.interp(
+                    target_radii, radii[finite], pcf_excess[finite], left=np.nan, right=np.nan
+                )
+            samples.append(pcf_excess)
+        if not samples:
+            continue
+        ci = _pointwise_autocorr_corrected_mean_ci(np.vstack(samples), config)
+        d_values.append(d_value)
+        means.append(ci["mean"])
+        half_widths.append(ci["half_width"])
+        mcses.append(ci["mcse"])
+        batch_counts.append(ci["batch_count"])
+        sample_counts.append(len(samples))
+
+    d_array = np.asarray(d_values, dtype=float)
+    mean_array = np.vstack(means)
+    half_width_array = np.vstack(half_widths)
+    mcse_array = np.vstack(mcses)
+    fits = _fit_exponential_pcfs(target_radii, mean_array, mcse_array)
+    tests = _test_pcf_fit_hypotheses(
+        d_array, fits["amplitude"], fits["amplitude_se"], fits["lambda"], fits["lambda_se"]
+    )
+    payload = {
+        "d_values": d_array,
+        "radii": target_radii,
+        "pcf_excess_mean": mean_array,
+        "pcf_excess_ci_half_width": half_width_array,
+        "pcf_excess_mcse": mcse_array,
+        "pcf_excess_lower": mean_array - half_width_array,
+        "pcf_excess_upper": mean_array + half_width_array,
+        "batch_count": np.vstack(batch_counts),
+        "sample_count": np.asarray(sample_counts, dtype=int),
+        "fits": fits,
+        "hypothesis_tests": tests,
+    }
+    array_payload = {k: v for k, v in payload.items() if isinstance(v, np.ndarray)}
+    np.savez_compressed(output_dir / "pcf_posthoc_analysis.npz", **array_payload)
+    json_path = output_dir / "pcf_posthoc_analysis.json"
+    with json_path.open("w", encoding="utf-8") as fh:
+        json.dump(_json_ready(payload), fh, indent=2, sort_keys=True)
+    return json_path
+
+
+def _load_pcf_posthoc(output_dir: Path) -> dict[str, object]:
+    path = output_dir / "pcf_posthoc_analysis.json"
+    if not path.exists():
+        save_pcf_posthoc_analysis(output_dir)
+    with path.open(encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def save_pcf_grid_plot(output_dir: Path, plot_path: Path | None = None) -> Path:
+    """Save a 4 x 3 grid of PCF - 1 curves with point-wise confidence bands."""
+
+    analysis = _load_pcf_posthoc(output_dir)
+    d_values = np.asarray(analysis["d_values"], dtype=float)
+    radii = np.asarray(analysis["radii"], dtype=float)
+    means = np.asarray(analysis["pcf_excess_mean"], dtype=float)
+    lower = np.asarray(analysis["pcf_excess_lower"], dtype=float)
+    upper = np.asarray(analysis["pcf_excess_upper"], dtype=float)
+    fitted = np.asarray(analysis["fits"]["fitted_pcf_excess"], dtype=float)
+    if plot_path is None:
+        plot_path = output_dir / "pcf_grid.png"
+    plot_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(3, 4, figsize=(16, 9), sharex=True, sharey=True)
+    flat_axes = axes.ravel()
+    for axis, d_value, mean, lo, hi, fit in zip(
+        flat_axes, d_values, means, lower, upper, fitted, strict=False
+    ):
+        axis.fill_between(radii, lo, hi, color="tab:blue", alpha=0.2, label="point-wise 95% CI")
+        axis.plot(radii, mean, color="tab:blue", label="PCF - 1")
+        axis.plot(
+            radii[radii > 0.0],
+            fit[radii > 0.0],
+            color="tab:orange",
+            linestyle="--",
+            label="exp fit",
+        )
+        axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
+        axis.set_title(f"d = {d_value:.2f}")
+        axis.grid(True, alpha=0.25)
+    for axis in flat_axes[len(d_values) :]:
+        axis.axis("off")
+    flat_axes[0].legend(loc="best", fontsize="small")
+    fig.supxlabel("distance x")
+    fig.supylabel("PCF(x) - 1")
+    fig.tight_layout()
+    fig.savefig(plot_path, dpi=200)
+    plt.close(fig)
+    return plot_path
+
+
+def save_pcf_fit_parameter_plot(output_dir: Path, plot_path: Path | None = None) -> Path:
+    """Save fitted exponential amplitude and decay-rate summaries versus d."""
+
+    analysis = _load_pcf_posthoc(output_dir)
+    d_values = np.asarray(analysis["d_values"], dtype=float)
+    fits = analysis["fits"]
+    amplitude = np.asarray(fits["amplitude"], dtype=float)
+    amplitude_se = np.asarray(fits["amplitude_se"], dtype=float)
+    lambda_ = np.asarray(fits["lambda"], dtype=float)
+    lambda_se = np.asarray(fits["lambda_se"], dtype=float)
+    tests = analysis["hypothesis_tests"]
+    if plot_path is None:
+        plot_path = output_dir / "pcf_fit_parameters.png"
+    plot_path.parent.mkdir(parents=True, exist_ok=True)
+    d_grid = np.linspace(float(np.min(d_values)), float(np.max(d_values)), 200)
+    lambda_const = float(tests["lambda_constant"]["coefficients"][0])
+    lambda_band = float(tests["lambda_constant"]["ci_half_width"][0])
+    amplitude_analysis_d_values = np.asarray(tests["amplitude_analysis_d_values"], dtype=float)
+    amp_grid = np.linspace(
+        float(np.min(amplitude_analysis_d_values)), float(np.max(amplitude_analysis_d_values)), 200
+    )
+    amp_coef = np.asarray(tests["amplitude_linear"]["coefficients"], dtype=float)
+    amp_cov = np.asarray(tests["amplitude_linear"]["covariance"], dtype=float)
+    design = amp_grid[:, np.newaxis]
+    amp_line = design @ amp_coef
+    amp_band = stats.t.ppf(0.975, int(tests["amplitude_linear"]["dof"])) * np.sqrt(
+        np.sum((design @ amp_cov) * design, axis=1)
+    )
+    fig, (lambda_ax, amp_ax) = plt.subplots(2, 1, figsize=(8, 7), sharex=True)
+    lambda_ax.errorbar(d_values, lambda_, yerr=1.96 * lambda_se, fmt="o", capsize=3)
+    lambda_ax.plot(d_grid, np.full_like(d_grid, lambda_const), color="tab:orange")
+    lambda_ax.fill_between(
+        d_grid,
+        lambda_const - lambda_band,
+        lambda_const + lambda_band,
+        color="tab:orange",
+        alpha=0.2,
+    )
+    lambda_ax.set_ylabel("lambda")
+    lambda_ax.set_title(f"constant lambda p = {float(tests['lambda_slope_p_value']):.3g}")
+    lambda_ax.grid(True, alpha=0.25)
+    amp_ax.errorbar(d_values, amplitude, yerr=1.96 * amplitude_se, fmt="o", capsize=3)
+    amp_ax.plot(amp_grid, amp_line, color="tab:orange")
+    amp_ax.fill_between(
+        amp_grid, amp_line - amp_band, amp_line + amp_band, color="tab:orange", alpha=0.2
+    )
+    amp_ax.set_xlabel("death rate d")
+    amp_ax.set_ylabel("A")
+    amp_ax.set_title(
+        f"zero-intercept linear A(d), d>0 quadratic p = {float(tests['amplitude_quadratic_p_value']):.3g}"
+    )
+    amp_ax.grid(True, alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(plot_path, dpi=200)
+    plt.close(fig)
+    return plot_path
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-dir", type=Path, default=Path("results/adaptive_d_scaling"))
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_DATA_DIR / "adaptive_d_scaling")
     parser.add_argument("--seed", type=int, default=AdaptiveDScalingConfig.seed)
     parser.add_argument("--length", type=float, default=AdaptiveDScalingConfig.length)
     parser.add_argument("--d-min", type=float, default=0.0)
     parser.add_argument("--d-max", type=float, default=0.1)
     parser.add_argument("--d-step", type=float, default=0.01)
     parser.add_argument("--only-d", type=float, default=None)
-    parser.add_argument("--max-equilibration-steps", type=int, default=AdaptiveDScalingConfig.max_equilibration_steps)
-    parser.add_argument("--max-measurement-steps", type=int, default=AdaptiveDScalingConfig.max_measurement_steps)
-    parser.add_argument("--coordinate-stride", type=int, default=AdaptiveDScalingConfig.coordinate_stride)
+    parser.add_argument(
+        "--max-equilibration-steps",
+        type=int,
+        default=AdaptiveDScalingConfig.max_equilibration_steps,
+    )
+    parser.add_argument(
+        "--max-measurement-steps", type=int, default=AdaptiveDScalingConfig.max_measurement_steps
+    )
+    parser.add_argument(
+        "--coordinate-stride", type=int, default=AdaptiveDScalingConfig.coordinate_stride
+    )
     parser.add_argument("--summary-plot", type=Path, default=None)
     parser.add_argument("--convergence-plot", type=Path, default=None)
     parser.add_argument("--summary-plot-only", action="store_true")
+    parser.add_argument("--pcf-posthoc-only", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.pcf_posthoc_only:
+        save_pcf_posthoc_analysis(args.output_dir)
+        save_pcf_grid_plot(args.output_dir)
+        save_pcf_fit_parameter_plot(args.output_dir)
+        return
 
     if args.summary_plot_only:
         save_summary_plot(args.output_dir, args.summary_plot)
@@ -562,7 +1037,10 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.only_d is None:
-        d_values = tuple(float(x) for x in np.round(np.arange(args.d_min, args.d_max + args.d_step / 2, args.d_step), 2))
+        d_values = tuple(
+            float(x)
+            for x in np.round(np.arange(args.d_min, args.d_max + args.d_step / 2, args.d_step), 2)
+        )
     else:
         d_values = (float(args.only_d),)
     config = AdaptiveDScalingConfig(

@@ -139,7 +139,7 @@ def plot_population_dynamics(output: Path) -> None:
 
 
 def main() -> None:
-    plot_population_dynamics(Path("article/figures/ppp_population_dynamics.png"))
+    plot_population_dynamics(Path("data/figures/ppp_population_dynamics.png"))
 
 
 if __name__ == "__main__":

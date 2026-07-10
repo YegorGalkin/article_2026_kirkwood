@@ -1,9 +1,10 @@
-# Data
+# Data directory
 
-Keep only small, curated input data here. Generated simulation outputs belong in
-`results/` and should be reproducible from configuration, seeds, and code.
+Generated experiment outputs should be written under this repo-root `data/`
+directory. The files are reproducible from configuration, seeds, and code, so
+large generated artifacts should not be committed unless explicitly required.
 
-Adaptive death-rate scaling runs write their summaries, coordinate trace shards,
-regression/convergence diagnostics, and summary plots to
-`results/adaptive_d_scaling/` by default; those generated artifacts should not be
-copied into this directory.
+The adaptive death-rate scaling runner writes to `data/adaptive_d_scaling/` by
+default. Post-hoc PCF analysis writes `pcf_posthoc_analysis.json`,
+`pcf_posthoc_analysis.npz`, `pcf_grid.png`, and `pcf_fit_parameters.png` into the
+same experiment output directory.

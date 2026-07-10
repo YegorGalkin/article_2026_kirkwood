@@ -9,13 +9,13 @@ stochastic simulation algorithm (SSA) experiments.
 ```bash
 uv sync --extra dev
 uv run pytest
-uv run run-scaling --output results/minimal_scaling.npz
-uv run make-figures results/minimal_scaling.npz --output article/figures/scaling.png
+uv run run-scaling --output data/minimal_scaling.npz
+uv run make-figures data/minimal_scaling.npz --output data/figures/scaling.png
 ```
 
 The package uses `uv run` console entry points for reproducible execution. Reusable
 code lives in `src/kirkwood_article/`, while generated stochastic outputs should
-be written to `results/` and regenerated from saved metadata rather than
+be written to `data/` and regenerated from saved metadata rather than
 committed. Post-processing code for saved outputs lives under
 `src/kirkwood_article/analysis/`, and coordinate trace I/O lives under
 `src/kirkwood_article/io/`.
@@ -41,7 +41,7 @@ or within `±5%` of the observed mean density.
 Run the full grid with:
 
 ```bash
-uv run run-adaptive-d-scaling --output-dir results/adaptive_d_scaling
+uv run run-adaptive-d-scaling --output-dir data/adaptive_d_scaling
 ```
 
 For a faster smoke test on the quickest grid point:
@@ -49,12 +49,12 @@ For a faster smoke test on the quickest grid point:
 ```bash
 uv run run-adaptive-d-scaling \
   --only-d 0.1 \
-  --output-dir results/adaptive_d_scaling_d01_smoke \
+  --output-dir data/adaptive_d_scaling_d01_smoke \
   --max-equilibration-steps 10000 \
   --max-measurement-steps 15000
 ```
 
-Outputs are written under the selected `results/` subdirectory:
+Outputs are written under the selected `data/` subdirectory:
 
 - `summary.json` contains all per-`d` density estimates, confidence half-widths,
   seeds, and run metadata.
@@ -77,8 +77,16 @@ directory:
 
 ```bash
 uv run run-adaptive-d-scaling \
-  --output-dir results/adaptive_d_scaling \
+  --output-dir data/adaptive_d_scaling \
   --summary-plot-only
+```
+
+To run post-hoc pair-correlation analysis from saved measurement coordinate shards:
+
+```bash
+uv run run-adaptive-d-scaling \
+  --output-dir data/adaptive_d_scaling \
+  --pcf-posthoc-only
 ```
 
 ## Simulator backend
