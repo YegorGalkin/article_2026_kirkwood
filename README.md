@@ -13,9 +13,12 @@ uv run run-scaling --output results/minimal_scaling.npz
 uv run make-figures results/minimal_scaling.npz --output article/figures/scaling.png
 ```
 
-The package intentionally keeps experiment scripts thin. Reusable code lives in
-`src/kirkwood_article/`, while generated stochastic outputs should be written to
-`results/` and regenerated from saved metadata rather than committed.
+The package uses `uv run` console entry points for reproducible execution. Reusable
+code lives in `src/kirkwood_article/`, while generated stochastic outputs should
+be written to `results/` and regenerated from saved metadata rather than
+committed. Post-processing code for saved outputs lives under
+`src/kirkwood_article/analysis/`, and coordinate trace I/O lives under
+`src/kirkwood_article/io/`.
 
 ## Adaptive death-rate scaling experiment
 
@@ -57,8 +60,9 @@ Outputs are written under the selected `results/` subdirectory:
   seeds, and run metadata.
 - `d_*/summary.json` stores each individual grid-point summary.
 - `d_*/*_step_*.npz` coordinate shards store the phase, step, simulation time,
-  event count, population, and current one-dimensional particle coordinates so
-  second and third spatial moments can be reconstructed later.
+  event count, population, and current one-dimensional particle coordinates.
+  These saved shards are the source of truth for future second and third spatial
+  moment post-processing.
 - `density_scaling_summary.png` compares observed densities and confidence bands
   against mean field, overlays a zero-intercept linear residual fit, and shows
   residual diagnostics.
