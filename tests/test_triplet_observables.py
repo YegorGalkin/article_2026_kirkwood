@@ -3,8 +3,6 @@ import numpy as np
 from kirkwood_article.sim.observables import triplet_correlation_ordered_1d
 from kirkwood_article.experiments.adaptive_d_scaling import (
     AdaptiveDScalingConfig,
-    _impute_invalid_1d,
-    _impute_invalid_2d,
     _pointwise_autocorr_corrected_mean_ci_nd,
 )
 
@@ -29,16 +27,6 @@ def test_triplet_correlation_requires_three_particles():
     assert np.isnan(g3).all()
 
 
-def test_triplet_imputation_helpers():
-    one_d, one_count = _impute_invalid_1d(np.array([1.0, 0.0, 3.0]))
-    two_d, two_count = _impute_invalid_2d(np.array([[1.0, 0.0], [3.0, 5.0]]))
-
-    assert one_count == 1
-    assert one_d[1] == 2.0
-    assert two_count == 1
-    assert two_d[0, 1] == 3.0
-
-
 def test_pointwise_autocorr_ci_nd_preserves_grid_shape():
     samples = np.arange(4 * 2 * 3, dtype=float).reshape(4, 2, 3)
     config = AdaptiveDScalingConfig(min_batch_size=1)
@@ -52,7 +40,12 @@ def test_pointwise_autocorr_ci_nd_preserves_grid_shape():
 def test_save_triplet_posthoc_analysis_writes_outputs(tmp_path):
     import json
 
-    from kirkwood_article.experiments.adaptive_d_scaling import save_triplet_posthoc_analysis
+    from kirkwood_article.experiments.adaptive_d_scaling import (
+        save_triplet_difference_line_plots,
+        save_triplet_difference_surface_plots,
+        save_triplet_g3_surface_plots,
+        save_triplet_posthoc_analysis,
+    )
 
     output_dir = tmp_path / "run"
     d_dir = output_dir / "d_0.00"
@@ -85,4 +78,13 @@ def test_save_triplet_posthoc_analysis_writes_outputs(tmp_path):
     assert payload["r1_values"] == [0.0, 1.0, 2.0]
     assert payload["r2_values"] == [0.0, 1.0, 2.0]
     assert payload["sample_count"] == [4]
-    assert "log_q_p_value" in payload
+    assert "difference_mean" in payload
+    assert not any(key.startswith("log_") for key in payload)
+    assert not any("imputation" in key for key in payload)
+    assert save_triplet_g3_surface_plots(output_dir)[0].name == "triplet_g3_surface_d_0.00.png"
+    assert (output_dir / "triplet_g3_surface_d_0.00.png").exists()
+    assert (
+        save_triplet_difference_surface_plots(output_dir)[0].name
+        == "triplet_difference_surface_d_0.00.png"
+    )
+    assert save_triplet_difference_line_plots(output_dir).name == "triplet_difference_lines.png"

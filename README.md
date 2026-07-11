@@ -89,7 +89,7 @@ uv run run-adaptive-d-scaling \
   --pcf-posthoc-only
 ```
 
-To run post-hoc ordered triplet-correlation analysis and log-Q plots from the
+To run post-hoc ordered triplet-correlation analysis and closure-difference plots from the
 same saved measurement coordinate shards:
 
 ```bash

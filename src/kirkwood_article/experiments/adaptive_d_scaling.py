@@ -43,8 +43,9 @@ __all__ = [
     "save_pcf_grid_plot",
     "save_pcf_posthoc_analysis",
     "save_triplet_posthoc_analysis",
-    "save_triplet_log_q_line_plots",
-    "save_triplet_log_q_surface_plots",
+    "save_triplet_difference_line_plots",
+    "save_triplet_difference_surface_plots",
+    "save_triplet_g3_surface_plots",
     "_weighted_zero_bias_fit",
 ]
 
@@ -662,43 +663,6 @@ def _pointwise_autocorr_corrected_mean_ci_nd(
     }
 
 
-def _impute_invalid_1d(values: np.ndarray) -> tuple[np.ndarray, int]:
-    """Replace non-positive or non-finite 1D values with local neighbor averages."""
-
-    result = np.asarray(values, dtype=float).copy()
-    invalid = ~np.isfinite(result) | (result <= 0.0)
-    count = int(np.count_nonzero(invalid))
-    original = result.copy()
-    valid = np.isfinite(original) & (original > 0.0)
-    fallback = float(np.nanmean(original[valid])) if np.any(valid) else 1.0
-    for index in np.flatnonzero(invalid):
-        neighbors = []
-        if index > 0 and valid[index - 1]:
-            neighbors.append(original[index - 1])
-        if index + 1 < len(original) and valid[index + 1]:
-            neighbors.append(original[index + 1])
-        result[index] = float(np.mean(neighbors)) if neighbors else fallback
-    return result, count
-
-
-def _impute_invalid_2d(values: np.ndarray) -> tuple[np.ndarray, int]:
-    """Replace non-positive or non-finite 2D values with local neighbor averages."""
-
-    result = np.asarray(values, dtype=float).copy()
-    invalid = ~np.isfinite(result) | (result <= 0.0)
-    count = int(np.count_nonzero(invalid))
-    original = result.copy()
-    valid = np.isfinite(original) & (original > 0.0)
-    fallback = float(np.nanmean(original[valid])) if np.any(valid) else 1.0
-    for i, j in zip(*np.nonzero(invalid), strict=False):
-        neighbors = []
-        for ii, jj in ((i - 1, j), (i + 1, j), (i, j - 1), (i, j + 1)):
-            if 0 <= ii < original.shape[0] and 0 <= jj < original.shape[1] and valid[ii, jj]:
-                neighbors.append(original[ii, jj])
-        result[i, j] = float(np.mean(neighbors)) if neighbors else fallback
-    return result, count
-
-
 def _lookup_grid_values(radii: np.ndarray, values: np.ndarray, targets: np.ndarray) -> np.ndarray:
     """Return values at nearest grid locations for target radii."""
 
@@ -711,7 +675,7 @@ def _lookup_grid_values(radii: np.ndarray, values: np.ndarray, targets: np.ndarr
 
 
 def save_triplet_posthoc_analysis(output_dir: Path, dr: float = 0.1, r_max: float = 5.0) -> Path:
-    """Compute post-equilibrium ordered triplet ``g3`` and ``log Q`` summaries."""
+    """Compute post-equilibrium ordered triplet ``g3`` and closure-difference summaries."""
 
     summaries, config_payload = _load_output_metadata(output_dir)
     length = float(config_payload.get("length", AdaptiveDScalingConfig.length))
@@ -727,22 +691,16 @@ def save_triplet_posthoc_analysis(output_dir: Path, dr: float = 0.1, r_max: floa
     d_values = []
     g3_means = []
     g3_half_widths = []
-    log_q_means = []
-    log_q_half_widths = []
-    log_q_mcses = []
-    log_q_batch_counts = []
-    log_q_p_values = []
-    log_q_significance = []
-    g2_imputations = []
-    g3_imputations = []
+    difference_means = []
+    difference_half_widths = []
+    difference_mcses = []
+    difference_batch_counts = []
     sample_counts = []
 
     for summary in sorted(summaries, key=lambda item: float(item["d"])):
         d_value = float(summary["d"])
         g3_samples = []
-        log_q_samples = []
-        g2_imp_total = 0
-        g3_imp_total = 0
+        difference_samples = []
         for shard in iter_coordinate_shards(output_dir / f"d_{d_value:.2f}", phase="measurement"):
             r1_values, r2_values, g3 = triplet_correlation_ordered_1d(
                 shard.positions, length=length, dr=dr, r_max=r_max
@@ -753,46 +711,27 @@ def save_triplet_posthoc_analysis(output_dir: Path, dr: float = 0.1, r_max: floa
             if len(r1_values) != len(target) or not np.allclose(r1_values, target):
                 raise ValueError("triplet grid does not match requested target grid")
             g2_on_target = np.interp(g2_target, radii, g2, left=np.nan, right=np.nan)
-            g2_on_target, g2_imp = _impute_invalid_1d(g2_on_target)
-            g3, g3_imp = _impute_invalid_2d(g3)
-            g2_imp_total += g2_imp
-            g3_imp_total += g3_imp
             g2_r1 = _lookup_grid_values(g2_target, g2_on_target, r1_grid.ravel()).reshape(g3.shape)
             g2_r2 = _lookup_grid_values(g2_target, g2_on_target, r2_grid.ravel()).reshape(g3.shape)
             g2_sum = _lookup_grid_values(g2_target, g2_on_target, rsum).reshape(g3.shape)
-            denominator = g2_r1 * g2_r2 * g2_sum
-            log_q = np.log(g3 / denominator)
+            pair_product = g2_r1 * g2_r2 * g2_sum
             g3_samples.append(g3)
-            log_q_samples.append(log_q)
-        if not log_q_samples:
+            difference_samples.append(g3 - pair_product)
+        if not difference_samples:
             continue
         g3_ci = _pointwise_autocorr_corrected_mean_ci_nd(np.stack(g3_samples), config)
-        log_q_ci = _pointwise_autocorr_corrected_mean_ci_nd(np.stack(log_q_samples), config)
-        dof = np.maximum(log_q_ci["batch_count"] - 1, 1)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            t_stat = log_q_ci["mean"] / log_q_ci["mcse"]
-            p_value = 2.0 * stats.t.sf(np.abs(t_stat), dof)
-        p_value[~np.isfinite(p_value)] = np.nan
-        significance = np.where(
-            (p_value <= 0.05) & (log_q_ci["mean"] > 0.0),
-            1,
-            np.where((p_value <= 0.05) & (log_q_ci["mean"] < 0.0), -1, 0),
-        )
+        difference_ci = _pointwise_autocorr_corrected_mean_ci_nd(np.stack(difference_samples), config)
         d_values.append(d_value)
         g3_means.append(g3_ci["mean"])
         g3_half_widths.append(g3_ci["half_width"])
-        log_q_means.append(log_q_ci["mean"])
-        log_q_half_widths.append(log_q_ci["half_width"])
-        log_q_mcses.append(log_q_ci["mcse"])
-        log_q_batch_counts.append(log_q_ci["batch_count"])
-        log_q_p_values.append(p_value)
-        log_q_significance.append(significance)
-        g2_imputations.append(g2_imp_total)
-        g3_imputations.append(g3_imp_total)
-        sample_counts.append(len(log_q_samples))
+        difference_means.append(difference_ci["mean"])
+        difference_half_widths.append(difference_ci["half_width"])
+        difference_mcses.append(difference_ci["mcse"])
+        difference_batch_counts.append(difference_ci["batch_count"])
+        sample_counts.append(len(difference_samples))
 
-    mean_log_q = np.stack(log_q_means)
-    half_log_q = np.stack(log_q_half_widths)
+    mean_difference = np.stack(difference_means)
+    half_difference = np.stack(difference_half_widths)
     mean_g3 = np.stack(g3_means)
     half_g3 = np.stack(g3_half_widths)
     payload = {
@@ -804,16 +743,12 @@ def save_triplet_posthoc_analysis(output_dir: Path, dr: float = 0.1, r_max: floa
         "g3_ci_half_width": half_g3,
         "g3_lower": mean_g3 - half_g3,
         "g3_upper": mean_g3 + half_g3,
-        "log_q_mean": mean_log_q,
-        "log_q_ci_half_width": half_log_q,
-        "log_q_lower": mean_log_q - half_log_q,
-        "log_q_upper": mean_log_q + half_log_q,
-        "log_q_mcse": np.stack(log_q_mcses),
-        "log_q_batch_count": np.stack(log_q_batch_counts),
-        "log_q_p_value": np.stack(log_q_p_values),
-        "log_q_significance": np.stack(log_q_significance),
-        "g2_imputation_count": np.asarray(g2_imputations, dtype=int),
-        "g3_imputation_count": np.asarray(g3_imputations, dtype=int),
+        "difference_mean": mean_difference,
+        "difference_ci_half_width": half_difference,
+        "difference_lower": mean_difference - half_difference,
+        "difference_upper": mean_difference + half_difference,
+        "difference_mcse": np.stack(difference_mcses),
+        "difference_batch_count": np.stack(difference_batch_counts),
         "sample_count": np.asarray(sample_counts, dtype=int),
     }
     array_payload = {k: v for k, v in payload.items() if isinstance(v, np.ndarray)}
@@ -832,48 +767,90 @@ def _load_triplet_posthoc(output_dir: Path) -> dict[str, object]:
         return json.load(fh)
 
 
-def save_triplet_log_q_surface_plots(output_dir: Path, plot_dir: Path | None = None) -> list[Path]:
-    """Save one log-Q significance surface plot for each death-rate value."""
+def _positive_triplet_plot_window(
+    r1_values: np.ndarray, r2_values: np.ndarray, *arrays: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, list[np.ndarray]]:
+    """Return r1/r2 grids and arrays with zero-radius rows/columns removed."""
+
+    r1_mask = r1_values > 0.0
+    r2_mask = r2_values > 0.0
+    trimmed = [array[np.ix_(r1_mask, r2_mask)] for array in arrays]
+    return r1_values[r1_mask], r2_values[r2_mask], trimmed
+
+
+def save_triplet_g3_surface_plots(output_dir: Path, plot_dir: Path | None = None) -> list[Path]:
+    """Save one positive-radius g3 point-estimate surface plot per death-rate value."""
 
     analysis = _load_triplet_posthoc(output_dir)
     d_values = np.asarray(analysis["d_values"], dtype=float)
     r1_values = np.asarray(analysis["r1_values"], dtype=float)
     r2_values = np.asarray(analysis["r2_values"], dtype=float)
-    means = np.asarray(analysis["log_q_mean"], dtype=float)
-    significance = np.asarray(analysis["log_q_significance"], dtype=int)
+    means = np.asarray(analysis["g3_mean"], dtype=float)
     if plot_dir is None:
         plot_dir = output_dir
     plot_dir.mkdir(parents=True, exist_ok=True)
+    positive_values = means[:, 1:, 1:]
+    vmax = float(np.nanmax(positive_values)) if np.any(np.isfinite(positive_values)) else 1.0
     paths = []
-    vmax = float(np.nanmax(np.abs(means))) if np.any(np.isfinite(means)) else 1.0
-    for d_value, mean, sig in zip(d_values, means, significance, strict=False):
-        signed = np.where(sig == 0, 0.0, mean)
+    for d_value, mean in zip(d_values, means, strict=False):
+        r1_plot, r2_plot, (mean_plot,) = _positive_triplet_plot_window(r1_values, r2_values, mean)
         fig, ax = plt.subplots(figsize=(7, 6))
-        mesh = ax.pcolormesh(r2_values, r1_values, signed, cmap="bwr", vmin=-vmax, vmax=vmax, shading="auto")
+        mesh = ax.pcolormesh(r2_plot, r1_plot, mean_plot, cmap="viridis", vmin=0.0, vmax=vmax, shading="auto")
         ax.set_xlabel("r2")
         ax.set_ylabel("r1")
-        ax.set_title(f"log Q significance, d = {d_value:.2f}")
-        fig.colorbar(mesh, ax=ax, label="log Q (white: p > 0.05)")
+        ax.set_title(f"g3 point estimate, d = {d_value:.2f}")
+        fig.colorbar(mesh, ax=ax, label="g3")
         fig.tight_layout()
-        path = plot_dir / f"triplet_log_q_surface_d_{d_value:.2f}.png"
+        path = plot_dir / f"triplet_g3_surface_d_{d_value:.2f}.png"
         fig.savefig(path, dpi=200)
         plt.close(fig)
         paths.append(path)
     return paths
 
 
-def save_triplet_log_q_line_plots(output_dir: Path, plot_path: Path | None = None) -> Path:
-    """Save log-Q slice plots with confidence bands for each death-rate value."""
+def save_triplet_difference_surface_plots(output_dir: Path, plot_dir: Path | None = None) -> list[Path]:
+    """Save one positive-radius closure-difference surface plot per death-rate value."""
 
     analysis = _load_triplet_posthoc(output_dir)
     d_values = np.asarray(analysis["d_values"], dtype=float)
     r1_values = np.asarray(analysis["r1_values"], dtype=float)
     r2_values = np.asarray(analysis["r2_values"], dtype=float)
-    means = np.asarray(analysis["log_q_mean"], dtype=float)
-    lower = np.asarray(analysis["log_q_lower"], dtype=float)
-    upper = np.asarray(analysis["log_q_upper"], dtype=float)
+    means = np.asarray(analysis["difference_mean"], dtype=float)
+    if plot_dir is None:
+        plot_dir = output_dir
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    positive_values = means[:, 1:, 1:]
+    vmax = float(np.nanmax(np.abs(positive_values))) if np.any(np.isfinite(positive_values)) else 1.0
+    paths = []
+    for d_value, mean in zip(d_values, means, strict=False):
+        r1_plot, r2_plot, (mean_plot,) = _positive_triplet_plot_window(r1_values, r2_values, mean)
+        fig, ax = plt.subplots(figsize=(7, 6))
+        mesh = ax.pcolormesh(r2_plot, r1_plot, mean_plot, cmap="bwr", vmin=-vmax, vmax=vmax, shading="auto")
+        ax.set_xlabel("r2")
+        ax.set_ylabel("r1")
+        ax.set_title(f"g3 - g2(r1)g2(r2)g2(r1+r2), d = {d_value:.2f}")
+        fig.colorbar(mesh, ax=ax, label="closure difference")
+        fig.tight_layout()
+        path = plot_dir / f"triplet_difference_surface_d_{d_value:.2f}.png"
+        fig.savefig(path, dpi=200)
+        plt.close(fig)
+        paths.append(path)
+    return paths
+
+
+def save_triplet_difference_line_plots(output_dir: Path, plot_path: Path | None = None) -> Path:
+    """Save positive-radius closure-difference slice plots with confidence bands."""
+
+    analysis = _load_triplet_posthoc(output_dir)
+    d_values = np.asarray(analysis["d_values"], dtype=float)
+    r1_values = np.asarray(analysis["r1_values"], dtype=float)
+    r2_values = np.asarray(analysis["r2_values"], dtype=float)
+    means = np.asarray(analysis["difference_mean"], dtype=float)
+    lower = np.asarray(analysis["difference_lower"], dtype=float)
+    upper = np.asarray(analysis["difference_upper"], dtype=float)
+    r_mask = r1_values > 0.0
     if plot_path is None:
-        plot_path = output_dir / "triplet_log_q_lines.png"
+        plot_path = output_dir / "triplet_difference_lines.png"
     plot_path.parent.mkdir(parents=True, exist_ok=True)
     ncols = 4
     nrows = int(np.ceil(len(d_values) / ncols))
@@ -883,14 +860,16 @@ def save_triplet_log_q_line_plots(output_dir: Path, plot_path: Path | None = Non
     for ax, d_value, mean, lo, hi in zip(flat_axes, d_values, means, lower, upper, strict=False):
         for fixed in fixed_r2:
             index = int(np.argmin(np.abs(r2_values - fixed)))
+            if r2_values[index] <= 0.0:
+                continue
             label = f"r2={r2_values[index]:.1f}"
-            ax.plot(r1_values, mean[:, index], label=label)
-            ax.fill_between(r1_values, lo[:, index], hi[:, index], alpha=0.12)
-        diag = np.diag(mean)
-        diag_lo = np.diag(lo)
-        diag_hi = np.diag(hi)
-        ax.plot(r1_values, diag, color="black", linestyle="--", label="r1=r2")
-        ax.fill_between(r1_values, diag_lo, diag_hi, color="black", alpha=0.08)
+            ax.plot(r1_values[r_mask], mean[r_mask, index], label=label)
+            ax.fill_between(r1_values[r_mask], lo[r_mask, index], hi[r_mask, index], alpha=0.12)
+        diag = np.diag(mean)[r_mask]
+        diag_lo = np.diag(lo)[r_mask]
+        diag_hi = np.diag(hi)[r_mask]
+        ax.plot(r1_values[r_mask], diag, color="black", linestyle="--", label="r1=r2")
+        ax.fill_between(r1_values[r_mask], diag_lo, diag_hi, color="black", alpha=0.08)
         ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
         ax.set_title(f"d = {d_value:.2f}")
         ax.grid(True, alpha=0.25)
@@ -898,11 +877,12 @@ def save_triplet_log_q_line_plots(output_dir: Path, plot_path: Path | None = Non
         ax.axis("off")
     flat_axes[0].legend(loc="best", fontsize="small")
     fig.supxlabel("r")
-    fig.supylabel("log Q")
+    fig.supylabel("g3 - g2(r1)g2(r2)g2(r1+r2)")
     fig.tight_layout()
     fig.savefig(plot_path, dpi=200)
     plt.close(fig)
     return plot_path
+
 
 def _exponential_excess_model(radii: np.ndarray, amplitude: float, lambda_: float) -> np.ndarray:
     return amplitude * np.exp(-lambda_ * radii)
@@ -1301,8 +1281,9 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.triplet_posthoc_only:
         save_triplet_posthoc_analysis(args.output_dir, dr=args.triplet_dr, r_max=args.triplet_r_max)
-        save_triplet_log_q_surface_plots(args.output_dir)
-        save_triplet_log_q_line_plots(args.output_dir)
+        save_triplet_g3_surface_plots(args.output_dir)
+        save_triplet_difference_surface_plots(args.output_dir)
+        save_triplet_difference_line_plots(args.output_dir)
         return
 
     if args.summary_plot_only:
