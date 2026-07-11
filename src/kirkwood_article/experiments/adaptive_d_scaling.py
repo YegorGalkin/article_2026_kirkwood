@@ -1202,9 +1202,7 @@ def save_pcf_fit_parameter_plot(output_dir: Path, plot_path: Path | None = None)
     lambda_const = float(tests["lambda_constant"]["coefficients"][0])
     lambda_band = float(tests["lambda_constant"]["ci_half_width"][0])
     amplitude_analysis_d_values = np.asarray(tests["amplitude_analysis_d_values"], dtype=float)
-    amp_grid = np.linspace(
-        float(np.min(amplitude_analysis_d_values)), float(np.max(amplitude_analysis_d_values)), 200
-    )
+    amp_grid = np.linspace(0.0, float(np.max(amplitude_analysis_d_values)), 200)
     amp_coef = np.asarray(tests["amplitude_linear"]["coefficients"], dtype=float)
     amp_cov = np.asarray(tests["amplitude_linear"]["covariance"], dtype=float)
     design = amp_grid[:, np.newaxis]
@@ -1222,8 +1220,11 @@ def save_pcf_fit_parameter_plot(output_dir: Path, plot_path: Path | None = None)
         color="tab:orange",
         alpha=0.2,
     )
+    lambda_ax.set_ylim(0.0, 1.0)
     lambda_ax.set_ylabel("lambda")
-    lambda_ax.set_title(f"constant lambda p = {float(tests['lambda_slope_p_value']):.3g}")
+    lambda_ax.set_title(
+        f"mean lambda = {lambda_const:.3g}, slope p = {float(tests['lambda_slope_p_value']):.3g}"
+    )
     lambda_ax.grid(True, alpha=0.25)
     amp_ax.errorbar(d_values, amplitude, yerr=1.96 * amplitude_se, fmt="o", capsize=3)
     amp_ax.plot(amp_grid, amp_line, color="tab:orange")
@@ -1233,7 +1234,8 @@ def save_pcf_fit_parameter_plot(output_dir: Path, plot_path: Path | None = None)
     amp_ax.set_xlabel("death rate d")
     amp_ax.set_ylabel("A")
     amp_ax.set_title(
-        f"zero-intercept linear A(d), d>0 quadratic p = {float(tests['amplitude_quadratic_p_value']):.3g}"
+        f"zero-intercept linear A(d), coefficient = {float(amp_coef[0]):.3g}, "
+        f"d>0 quadratic p = {float(tests['amplitude_quadratic_p_value']):.3g}"
     )
     amp_ax.grid(True, alpha=0.25)
     fig.tight_layout()
