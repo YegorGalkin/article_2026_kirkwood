@@ -18,7 +18,7 @@ from kirkwood_article.analysis.density_bias import (
     weighted_zero_bias_fit as _weighted_zero_bias_fit,
 )
 from kirkwood_article.io.coordinate_traces import CoordinateTraceWriter, iter_coordinate_shards
-from kirkwood_article.sim.observables import pair_correlation_fft_1d
+from kirkwood_article.sim.observables import pair_correlation_fft_1d, triplet_correlation_ordered_1d
 from kirkwood_article.sim.ssa_1d import (
     SSAParams,
     SSAState,
@@ -42,6 +42,10 @@ __all__ = [
     "save_pcf_fit_parameter_plot",
     "save_pcf_grid_plot",
     "save_pcf_posthoc_analysis",
+    "save_triplet_posthoc_analysis",
+    "save_triplet_difference_line_plots",
+    "save_triplet_difference_surface_plots",
+    "save_triplet_g3_surface_plots",
     "_weighted_zero_bias_fit",
 ]
 
@@ -641,6 +645,245 @@ def _pointwise_autocorr_corrected_mean_ci(
     }
 
 
+
+
+def _pointwise_autocorr_corrected_mean_ci_nd(
+    samples: np.ndarray, config: AdaptiveDScalingConfig
+) -> dict[str, np.ndarray]:
+    """Return point-wise autocorrelation-corrected 95% CIs for any sample grid."""
+
+    values = np.asarray(samples, dtype=float)
+    if values.ndim < 2:
+        raise ValueError("samples must have shape (time, *grid_shape)")
+    grid_shape = values.shape[1:]
+    flat_result = _pointwise_autocorr_corrected_mean_ci(values.reshape(values.shape[0], -1), config)
+    return {
+        key: np.asarray(value).reshape(grid_shape)
+        for key, value in flat_result.items()
+    }
+
+
+def _lookup_grid_values(radii: np.ndarray, values: np.ndarray, targets: np.ndarray) -> np.ndarray:
+    """Return values at nearest grid locations for target radii."""
+
+    indices = np.searchsorted(radii, targets)
+    indices = np.clip(indices, 0, len(radii) - 1)
+    previous = np.clip(indices - 1, 0, len(radii) - 1)
+    choose_previous = np.abs(radii[previous] - targets) < np.abs(radii[indices] - targets)
+    indices[choose_previous] = previous[choose_previous]
+    return values[indices]
+
+
+def save_triplet_posthoc_analysis(output_dir: Path, dr: float = 0.1, r_max: float = 5.0) -> Path:
+    """Compute post-equilibrium ordered triplet ``g3`` and closure-difference summaries."""
+
+    summaries, config_payload = _load_output_metadata(output_dir)
+    length = float(config_payload.get("length", AdaptiveDScalingConfig.length))
+    config_kwargs = {
+        k: v for k, v in config_payload.items() if k in AdaptiveDScalingConfig.__dataclass_fields__
+    }
+    config = AdaptiveDScalingConfig(**config_kwargs)
+    target = np.round(np.arange(0.0, r_max + dr / 2.0, dr), 10)
+    g2_target = np.round(np.arange(0.0, 2.0 * r_max + dr / 2.0, dr), 10)
+    r1_grid, r2_grid = np.meshgrid(target, target, indexing="ij")
+    rsum = (r1_grid + r2_grid).ravel()
+
+    d_values = []
+    g3_means = []
+    g3_half_widths = []
+    difference_means = []
+    difference_half_widths = []
+    difference_mcses = []
+    difference_batch_counts = []
+    sample_counts = []
+
+    for summary in sorted(summaries, key=lambda item: float(item["d"])):
+        d_value = float(summary["d"])
+        g3_samples = []
+        difference_samples = []
+        for shard in iter_coordinate_shards(output_dir / f"d_{d_value:.2f}", phase="measurement"):
+            r1_values, r2_values, g3 = triplet_correlation_ordered_1d(
+                shard.positions, length=length, dr=dr, r_max=r_max
+            )
+            radii, g2 = pair_correlation_fft_1d(
+                shard.positions, length=length, dr=dr, r_max=2.0 * r_max
+            )
+            if len(r1_values) != len(target) or not np.allclose(r1_values, target):
+                raise ValueError("triplet grid does not match requested target grid")
+            g2_on_target = np.interp(g2_target, radii, g2, left=np.nan, right=np.nan)
+            g2_r1 = _lookup_grid_values(g2_target, g2_on_target, r1_grid.ravel()).reshape(g3.shape)
+            g2_r2 = _lookup_grid_values(g2_target, g2_on_target, r2_grid.ravel()).reshape(g3.shape)
+            g2_sum = _lookup_grid_values(g2_target, g2_on_target, rsum).reshape(g3.shape)
+            pair_product = g2_r1 * g2_r2 * g2_sum
+            g3_samples.append(g3)
+            difference_samples.append(g3 - pair_product)
+        if not difference_samples:
+            continue
+        g3_ci = _pointwise_autocorr_corrected_mean_ci_nd(np.stack(g3_samples), config)
+        difference_ci = _pointwise_autocorr_corrected_mean_ci_nd(np.stack(difference_samples), config)
+        d_values.append(d_value)
+        g3_means.append(g3_ci["mean"])
+        g3_half_widths.append(g3_ci["half_width"])
+        difference_means.append(difference_ci["mean"])
+        difference_half_widths.append(difference_ci["half_width"])
+        difference_mcses.append(difference_ci["mcse"])
+        difference_batch_counts.append(difference_ci["batch_count"])
+        sample_counts.append(len(difference_samples))
+
+    mean_difference = np.stack(difference_means)
+    half_difference = np.stack(difference_half_widths)
+    mean_g3 = np.stack(g3_means)
+    half_g3 = np.stack(g3_half_widths)
+    payload = {
+        "d_values": np.asarray(d_values, dtype=float),
+        "r1_values": target,
+        "r2_values": target,
+        "g2_radii": g2_target,
+        "g3_mean": mean_g3,
+        "g3_ci_half_width": half_g3,
+        "g3_lower": mean_g3 - half_g3,
+        "g3_upper": mean_g3 + half_g3,
+        "difference_mean": mean_difference,
+        "difference_ci_half_width": half_difference,
+        "difference_lower": mean_difference - half_difference,
+        "difference_upper": mean_difference + half_difference,
+        "difference_mcse": np.stack(difference_mcses),
+        "difference_batch_count": np.stack(difference_batch_counts),
+        "sample_count": np.asarray(sample_counts, dtype=int),
+    }
+    array_payload = {k: v for k, v in payload.items() if isinstance(v, np.ndarray)}
+    np.savez_compressed(output_dir / "triplet_posthoc_analysis.npz", **array_payload)
+    json_path = output_dir / "triplet_posthoc_analysis.json"
+    with json_path.open("w", encoding="utf-8") as fh:
+        json.dump(_json_ready(payload), fh, indent=2, sort_keys=True)
+    return json_path
+
+
+def _load_triplet_posthoc(output_dir: Path) -> dict[str, object]:
+    path = output_dir / "triplet_posthoc_analysis.json"
+    if not path.exists():
+        save_triplet_posthoc_analysis(output_dir)
+    with path.open(encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _positive_triplet_plot_window(
+    r1_values: np.ndarray, r2_values: np.ndarray, *arrays: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, list[np.ndarray]]:
+    """Return r1/r2 grids and arrays with zero-radius rows/columns removed."""
+
+    r1_mask = r1_values > 0.0
+    r2_mask = r2_values > 0.0
+    trimmed = [array[np.ix_(r1_mask, r2_mask)] for array in arrays]
+    return r1_values[r1_mask], r2_values[r2_mask], trimmed
+
+
+def save_triplet_g3_surface_plots(output_dir: Path, plot_dir: Path | None = None) -> list[Path]:
+    """Save one positive-radius g3 point-estimate surface plot per death-rate value."""
+
+    analysis = _load_triplet_posthoc(output_dir)
+    d_values = np.asarray(analysis["d_values"], dtype=float)
+    r1_values = np.asarray(analysis["r1_values"], dtype=float)
+    r2_values = np.asarray(analysis["r2_values"], dtype=float)
+    means = np.asarray(analysis["g3_mean"], dtype=float)
+    if plot_dir is None:
+        plot_dir = output_dir
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    positive_values = means[:, 1:, 1:]
+    vmax = float(np.nanmax(positive_values)) if np.any(np.isfinite(positive_values)) else 1.0
+    paths = []
+    for d_value, mean in zip(d_values, means, strict=False):
+        r1_plot, r2_plot, (mean_plot,) = _positive_triplet_plot_window(r1_values, r2_values, mean)
+        fig, ax = plt.subplots(figsize=(7, 6))
+        mesh = ax.pcolormesh(r2_plot, r1_plot, mean_plot, cmap="viridis", vmin=0.0, vmax=vmax, shading="auto")
+        ax.set_xlabel("r2")
+        ax.set_ylabel("r1")
+        ax.set_title(f"g3 point estimate, d = {d_value:.2f}")
+        fig.colorbar(mesh, ax=ax, label="g3")
+        fig.tight_layout()
+        path = plot_dir / f"triplet_g3_surface_d_{d_value:.2f}.png"
+        fig.savefig(path, dpi=200)
+        plt.close(fig)
+        paths.append(path)
+    return paths
+
+
+def save_triplet_difference_surface_plots(output_dir: Path, plot_dir: Path | None = None) -> list[Path]:
+    """Save one positive-radius closure-difference surface plot per death-rate value."""
+
+    analysis = _load_triplet_posthoc(output_dir)
+    d_values = np.asarray(analysis["d_values"], dtype=float)
+    r1_values = np.asarray(analysis["r1_values"], dtype=float)
+    r2_values = np.asarray(analysis["r2_values"], dtype=float)
+    means = np.asarray(analysis["difference_mean"], dtype=float)
+    if plot_dir is None:
+        plot_dir = output_dir
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    positive_values = means[:, 1:, 1:]
+    vmax = float(np.nanmax(np.abs(positive_values))) if np.any(np.isfinite(positive_values)) else 1.0
+    paths = []
+    for d_value, mean in zip(d_values, means, strict=False):
+        r1_plot, r2_plot, (mean_plot,) = _positive_triplet_plot_window(r1_values, r2_values, mean)
+        fig, ax = plt.subplots(figsize=(7, 6))
+        mesh = ax.pcolormesh(r2_plot, r1_plot, mean_plot, cmap="bwr", vmin=-vmax, vmax=vmax, shading="auto")
+        ax.set_xlabel("r2")
+        ax.set_ylabel("r1")
+        ax.set_title(f"g3 - g2(r1)g2(r2)g2(r1+r2), d = {d_value:.2f}")
+        fig.colorbar(mesh, ax=ax, label="closure difference")
+        fig.tight_layout()
+        path = plot_dir / f"triplet_difference_surface_d_{d_value:.2f}.png"
+        fig.savefig(path, dpi=200)
+        plt.close(fig)
+        paths.append(path)
+    return paths
+
+
+def save_triplet_difference_line_plots(output_dir: Path, plot_path: Path | None = None) -> Path:
+    """Save positive-radius closure-difference slice plots with confidence bands."""
+
+    analysis = _load_triplet_posthoc(output_dir)
+    d_values = np.asarray(analysis["d_values"], dtype=float)
+    r1_values = np.asarray(analysis["r1_values"], dtype=float)
+    r2_values = np.asarray(analysis["r2_values"], dtype=float)
+    means = np.asarray(analysis["difference_mean"], dtype=float)
+    lower = np.asarray(analysis["difference_lower"], dtype=float)
+    upper = np.asarray(analysis["difference_upper"], dtype=float)
+    r_mask = r1_values > 0.0
+    if plot_path is None:
+        plot_path = output_dir / "triplet_difference_lines.png"
+    plot_path.parent.mkdir(parents=True, exist_ok=True)
+    ncols = 4
+    nrows = int(np.ceil(len(d_values) / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 3 * nrows), sharex=True, sharey=True)
+    flat_axes = np.atleast_1d(axes).ravel()
+    fixed_r2 = (0.1, 0.5, 1.0, 2.0)
+    for ax, d_value, mean, lo, hi in zip(flat_axes, d_values, means, lower, upper, strict=False):
+        for fixed in fixed_r2:
+            index = int(np.argmin(np.abs(r2_values - fixed)))
+            if r2_values[index] <= 0.0:
+                continue
+            label = f"r2={r2_values[index]:.1f}"
+            ax.plot(r1_values[r_mask], mean[r_mask, index], label=label)
+            ax.fill_between(r1_values[r_mask], lo[r_mask, index], hi[r_mask, index], alpha=0.12)
+        diag = np.diag(mean)[r_mask]
+        diag_lo = np.diag(lo)[r_mask]
+        diag_hi = np.diag(hi)[r_mask]
+        ax.plot(r1_values[r_mask], diag, color="black", linestyle="--", label="r1=r2")
+        ax.fill_between(r1_values[r_mask], diag_lo, diag_hi, color="black", alpha=0.08)
+        ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.5)
+        ax.set_title(f"d = {d_value:.2f}")
+        ax.grid(True, alpha=0.25)
+    for ax in flat_axes[len(d_values):]:
+        ax.axis("off")
+    flat_axes[0].legend(loc="best", fontsize="small")
+    fig.supxlabel("r")
+    fig.supylabel("g3 - g2(r1)g2(r2)g2(r1+r2)")
+    fig.tight_layout()
+    fig.savefig(plot_path, dpi=200)
+    plt.close(fig)
+    return plot_path
+
+
 def _exponential_excess_model(radii: np.ndarray, amplitude: float, lambda_: float) -> np.ndarray:
     return amplitude * np.exp(-lambda_ * radii)
 
@@ -1023,12 +1266,22 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--convergence-plot", type=Path, default=None)
     parser.add_argument("--summary-plot-only", action="store_true")
     parser.add_argument("--pcf-posthoc-only", action="store_true")
+    parser.add_argument("--triplet-posthoc-only", action="store_true")
+    parser.add_argument("--triplet-dr", type=float, default=0.1)
+    parser.add_argument("--triplet-r-max", type=float, default=5.0)
     args = parser.parse_args(argv)
 
     if args.pcf_posthoc_only:
         save_pcf_posthoc_analysis(args.output_dir)
         save_pcf_grid_plot(args.output_dir)
         save_pcf_fit_parameter_plot(args.output_dir)
+        return
+
+    if args.triplet_posthoc_only:
+        save_triplet_posthoc_analysis(args.output_dir, dr=args.triplet_dr, r_max=args.triplet_r_max)
+        save_triplet_g3_surface_plots(args.output_dir)
+        save_triplet_difference_surface_plots(args.output_dir)
+        save_triplet_difference_line_plots(args.output_dir)
         return
 
     if args.summary_plot_only:
