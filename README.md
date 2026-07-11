@@ -89,6 +89,15 @@ uv run run-adaptive-d-scaling \
   --pcf-posthoc-only
 ```
 
+To run post-hoc ordered triplet-correlation analysis and log-Q plots from the
+same saved measurement coordinate shards:
+
+```bash
+uv run run-adaptive-d-scaling \
+  --output-dir data/adaptive_d_scaling \
+  --triplet-posthoc-only
+```
+
 ## Simulator backend
 
 The public `kirkwood_article.sim.ssa_1d` API delegates the main event loop to a
