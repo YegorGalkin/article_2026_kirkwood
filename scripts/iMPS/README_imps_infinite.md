@@ -112,8 +112,11 @@ exterior regions remain infinite for every `ell`.
 
 ## Typical run
 
+From the repository root, prefer the packaged `uv` console entry point:
+
 ```bash
-python imps_linear_response.py \
+uv sync --extra imps
+uv run run-imps-linear-response \
   --b 1 --gamma 1 --lam 1 \
   --a 0.25 \
   --bond-dim 3 \
@@ -122,13 +125,13 @@ python imps_linear_response.py \
   --pairs 1,2,3,4,5,6,8,10 \
   --triplets '1,2;1,3;2,4;2,6' \
   --fit-degree 2 \
-  --output run_infinite_D3_l7
+  --output data/imps_infinite/run_infinite_D3_l7
 ```
 
-For a quick smoke test:
+For a quick smoke test through the same entry point:
 
 ```bash
-python imps_linear_response.py \
+uv run run-imps-linear-response \
   --bond-dim 2 \
   --projection-length 4 \
   --d-values 0.005,0.01 \
@@ -137,7 +140,22 @@ python imps_linear_response.py \
   --adam-steps 20 \
   --lbfgs-steps 0 \
   --fit-degree 1 \
-  --output smoke_test
+  --output data/imps_infinite/smoke_test
+```
+
+The legacy script path remains available as a wrapper for ad-hoc use:
+
+```bash
+uv run python scripts/iMPS/imps_linear_response.py --help
+```
+
+For comparison against adaptive simulations, generate the iMPS summary and then
+use the main repository pair-analysis entry point:
+
+```bash
+uv run run-pair-analysis \
+  --simulation-dir data/adaptive_d_scaling_exp_var1 \
+  --imps-summary data/imps_infinite/run_infinite_D3_l7/summary.json
 ```
 
 ## Calculated responses
