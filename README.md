@@ -98,6 +98,75 @@ uv run run-adaptive-d-scaling \
   --triplet-posthoc-only
 ```
 
+## iMPS pair-analysis workflow
+
+The iMPS linear-response workflow depends on PyTorch, which is kept behind the
+optional `imps` extra because it is a large dependency. Install the full
+development/iMPS environment with:
+
+```bash
+uv sync --extra dev --extra imps
+```
+
+The packaged console entry points are:
+
+- `uv run run-adaptive-d-scaling` for simulation runs and post-hoc PCF/triplet
+  analysis.
+- `uv run run-imps-linear-response` for the thermodynamic-limit iMPS derivative
+  prediction.
+- `uv run run-pair-analysis` for overlaying iMPS density and pair-correlation
+  predictions on adaptive simulation outputs.
+
+To generate simulation data comparable to the exponential-kernel iMPS theory,
+run adaptive scaling with equal birth/death exponential kernels and variance 1:
+
+```bash
+uv run run-adaptive-d-scaling \
+  --kernel exponential \
+  --kernel-variance 1 \
+  --output-dir data/adaptive_d_scaling_exp_var1
+```
+
+Run the iMPS linear-response prediction with the matching one-dimensional
+exponential kernel convention `K(r)=(lambda/2) exp(-lambda |r|)`. Variance 1
+corresponds to `lambda=sqrt(2)`:
+
+```bash
+uv run run-imps-linear-response \
+  --lam 1.4142135623730951 \
+  --a 0.25 \
+  --bond-dim 3 \
+  --projection-length 7 \
+  --d-values 0.00125,0.0025,0.005,0.01 \
+  --pairs 1,2,3,4,5,6,8,10,12,16,20 \
+  --triplets '1,2;1,3;2,4;2,6' \
+  --fit-degree 2 \
+  --output data/imps_exp_var1_D3_l7
+```
+
+After the adaptive run has measurement coordinate shards, compute PCF summaries
+and the iMPS overlay in one step from the adaptive entry point:
+
+```bash
+uv run run-adaptive-d-scaling \
+  --output-dir data/adaptive_d_scaling_exp_var1 \
+  --pcf-posthoc-only \
+  --imps-summary data/imps_exp_var1_D3_l7/summary.json
+```
+
+Alternatively, call the dedicated pair-analysis entry point directly:
+
+```bash
+uv run run-pair-analysis \
+  --simulation-dir data/adaptive_d_scaling_exp_var1 \
+  --imps-summary data/imps_exp_var1_D3_l7/summary.json
+```
+
+The pair-analysis workflow writes `pair_analysis.json`, `pair_analysis.npz`, and
+`pair_analysis_summary.png` under the simulation output directory. It validates
+that simulation and iMPS kernel metadata match by default; use
+`--allow-kernel-mismatch` only for exploratory comparisons.
+
 ## Simulator backend
 
 The public `kirkwood_article.sim.ssa_1d` API delegates the main event loop to a
