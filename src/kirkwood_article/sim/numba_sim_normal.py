@@ -5,7 +5,7 @@
 Spatial Stochastic Simulator with Normal (Gaussian) Kernels.
 Supports 1D, 2D, 3D with periodic or killing boundaries.
 Birth dispersal: np.random.normal, no max distance.
-Death kernel: normalized Gaussian K(r) = (2πσ²)^(-d/2) * exp(-r²/(2σ²))
+Death kernel: normalized Gaussian K(r) = (2πσ²)^(-d/2) * exp(-r²/(2σ²)) or 1D exponential K(r)=(lambda/2)*exp(-lambda*r).
 """
 from __future__ import annotations
 import math
@@ -13,6 +13,9 @@ from typing import Sequence
 import numpy as np
 from numpy.typing import NDArray
 from numba import njit, types
+
+KERNEL_NORMAL = 0
+KERNEL_EXPONENTIAL = 1
 from numba.experimental import jitclass
 
 @njit(cache=True, inline='always')
@@ -54,6 +57,29 @@ def _gaussian_kernel(r: float, sigma: float, ndim: int) -> float:
     return norm * math.exp(-r * r / (2.0 * var))
 
 @njit(cache=True, inline='always')
+def _exponential_kernel_1d(r: float, sigma: float) -> float:
+    if sigma <= 0.0:
+        return 0.0
+    lam = math.sqrt(2.0) / sigma
+    return 0.5 * lam * math.exp(-lam * r)
+
+@njit(cache=True, inline='always')
+def _interaction_kernel(r: float, sigma: float, ndim: int, kernel_kind: int) -> float:
+    if kernel_kind == KERNEL_EXPONENTIAL:
+        if ndim != 1:
+            return 0.0
+        return _exponential_kernel_1d(r, sigma)
+    return _gaussian_kernel(r, sigma, ndim)
+
+@njit(cache=True, inline='always')
+def _sample_laplace(std: float) -> float:
+    scale = std / math.sqrt(2.0)
+    value = np.random.exponential(scale)
+    if np.random.random() < 0.5:
+        return -value
+    return value
+
+@njit(cache=True, inline='always')
 def _sample_weighted(values: NDArray[np.float64]) -> int:
     """Sample an index from weighted distribution."""
     total = 0.0
@@ -81,6 +107,7 @@ ssa_normal_spec = [
     ("dd", types.Array(types.float64, 2, "C")),
     ("birth_std", types.Array(types.float64, 1, "C")),
     ("death_std", types.Array(types.float64, 2, "C")),
+    ("kernel_kind", types.int32),
     ("cutoff", types.Array(types.float64, 2, "C")),
     ("cull_range", types.Array(types.int32, 2, "C")),
     ("capacity", types.int64),
@@ -111,7 +138,7 @@ class SSANormalState:
                  cell_counts: NDArray, periodic: bool, capacity: np.int64,
                  cell_capacity: np.int32, seed: np.int64,
                  b: NDArray, d: NDArray, dd: NDArray, birth_std: NDArray,
-                 death_std: NDArray, death_cull_sigmas: float):
+                 death_std: NDArray, death_cull_sigmas: float, kernel_kind: np.int32):
         self.ndim = ndim
         self.species_count = species_count
         self.area_size = area_size
@@ -120,6 +147,7 @@ class SSANormalState:
         self.b, self.d, self.dd = b, d, dd
         self.birth_std = birth_std
         self.death_std = death_std
+        self.kernel_kind = kernel_kind
         
         self.cell_size = np.empty(ndim, dtype=np.float64)
         for dim in range(ndim):
@@ -300,7 +328,7 @@ class SSANormalState:
                     # Effect on others
                     if dd_ij != 0.0 and dist <= cutoff_ij:
                         sigma = self.death_std[species, osp]
-                        delta = dd_ij * _gaussian_kernel(dist, sigma, self.ndim)
+                        delta = dd_ij * _interaction_kernel(dist, sigma, self.ndim, self.kernel_kind)
                         self.death_rate[oid] += delta
                         self.cell_death_rate[ncell] += delta
                         self.total_death_rate += delta
@@ -308,7 +336,7 @@ class SSANormalState:
                     # Effect on self
                     if dd_ji != 0.0 and dist <= cutoff_ji:
                         sigma = self.death_std[osp, species]
-                        added += dd_ji * _gaussian_kernel(dist, sigma, self.ndim)
+                        added += dd_ji * _interaction_kernel(dist, sigma, self.ndim, self.kernel_kind)
         return added
     
     def _iter_neighbors(self, cell_id: int, cull: int):
@@ -465,7 +493,7 @@ class SSANormalState:
                     dist = _distance_nd(pos, opos, self.area_size, self.ndim, self.periodic)
                     if dist <= cutoff_val:
                         sigma = self.death_std[species, osp]
-                        delta = dd_val * _gaussian_kernel(dist, sigma, self.ndim)
+                        delta = dd_val * _interaction_kernel(dist, sigma, self.ndim, self.kernel_kind)
                         self.death_rate[oid] -= delta
                         self.cell_death_rate[ncell] -= delta
                         self.total_death_rate -= delta
@@ -528,7 +556,7 @@ class SSANormalState:
         child_pos = np.empty(self.ndim, dtype=np.float64)
         std = self.birth_std[species]
         for d in range(self.ndim):
-            child_pos[d] = self.positions[parent, d] + np.random.normal(0.0, std)
+            child_pos[d] = self.positions[parent, d] + (_sample_laplace(std) if self.kernel_kind == KERNEL_EXPONENTIAL and self.ndim == 1 else np.random.normal(0.0, std))
         
         return self._spawn_impl(species, child_pos)
     
@@ -640,7 +668,7 @@ def make_normal_ssa_1d(
     birth_std: Sequence[float], death_std: Sequence[Sequence[float]],
     *, death_cull_sigmas: float = 5.0,
     cell_count: int | None = None, is_periodic: bool = False,
-    seed: int | None = None,
+    seed: int | None = None, kernel_kind: int = KERNEL_NORMAL,
 ) -> SSANormalState:
     """Create 1D Normal SSA state."""
     n = int(M)
@@ -665,7 +693,24 @@ def make_normal_ssa_1d(
         np.int32(1), np.int32(n), area, cells, is_periodic,
         np.int64(capacity), np.int32(cell_cap),
         np.int64(seed if seed is not None else -1),
-        b, d, dd, bs, ds, death_cull_sigmas
+        b, d, dd, bs, ds, death_cull_sigmas, np.int32(kernel_kind)
+    )
+
+
+def make_exponential_ssa_1d(
+    M: int, area_len: float,
+    birth_rates: Sequence[float], death_rates: Sequence[float],
+    dd_matrix: Sequence[Sequence[float]],
+    birth_std: Sequence[float], death_std: Sequence[Sequence[float]],
+    *, death_cull_sigmas: float = 8.0,
+    cell_count: int | None = None, is_periodic: bool = False,
+    seed: int | None = None,
+) -> SSANormalState:
+    """Create 1D SSA state with equal-form exponential birth/death kernels."""
+    return make_normal_ssa_1d(
+        M, area_len, birth_rates, death_rates, dd_matrix, birth_std, death_std,
+        death_cull_sigmas=death_cull_sigmas, cell_count=cell_count,
+        is_periodic=is_periodic, seed=seed, kernel_kind=KERNEL_EXPONENTIAL,
     )
 
 
@@ -701,7 +746,7 @@ def make_normal_ssa_2d(
         np.int32(2), np.int32(n), area, cells, is_periodic,
         np.int64(capacity), np.int32(cell_cap),
         np.int64(seed if seed is not None else -1),
-        b, d, dd, bs, ds, death_cull_sigmas
+        b, d, dd, bs, ds, death_cull_sigmas, np.int32(KERNEL_NORMAL)
     )
 
 
@@ -737,7 +782,7 @@ def make_normal_ssa_3d(
         np.int32(3), np.int32(n), area, cells, is_periodic,
         np.int64(capacity), np.int32(cell_cap),
         np.int64(seed if seed is not None else -1),
-        b, d, dd, bs, ds, death_cull_sigmas
+        b, d, dd, bs, ds, death_cull_sigmas, np.int32(KERNEL_NORMAL)
     )
 
 
@@ -761,7 +806,10 @@ def get_all_particle_coords(state: SSANormalState) -> list[NDArray[np.float64]]:
 
 __all__ = [
     "SSANormalState",
+    "KERNEL_NORMAL",
+    "KERNEL_EXPONENTIAL",
     "make_normal_ssa_1d",
+    "make_exponential_ssa_1d",
     "make_normal_ssa_2d",
     "make_normal_ssa_3d",
     "get_all_particle_coords",
