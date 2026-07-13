@@ -17,6 +17,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+imps = [
+  "torch>=2.2",
+]
 dev = [
   "pytest>=8.0",
   "ruff>=0.6",
@@ -27,6 +30,8 @@ dev = [
 [project.scripts]
 run-scaling = "kirkwood_article.experiments.scaling:main"
 run-adaptive-d-scaling = "kirkwood_article.experiments.adaptive_d_scaling:main"
+run-imps-linear-response = "kirkwood_article.theory.imps_linear_response:main"
+run-pair-analysis = "kirkwood_article.experiments.pair_analysis:main"
 make-figures = "kirkwood_article.plotting.figures:main"
 
 [build-system]
