@@ -10,7 +10,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from kirkwood_article.sim.numba_sim_normal import SSANormalState, make_normal_ssa_1d
+from kirkwood_article.sim.numba_sim_normal import (
+    SSANormalState,
+    make_exponential_ssa_1d,
+    make_normal_ssa_1d,
+)
 
 
 @dataclass(frozen=True)
@@ -23,6 +27,9 @@ class SSAParams:
     competition_rate: float = 0.01
     birth_sigma: float = 1.0
     death_sigma: float = 1.0
+    kernel: str = "normal"
+    kernel_variance: float = 1.0
+    equal_birth_death_kernels: bool = True
     seed: int = 0
     death_cull_sigmas: float = 5.0
     cell_count: int | None = None
@@ -34,6 +41,10 @@ class SSAParams:
             raise ValueError("rates must be non-negative")
         if self.birth_sigma <= 0 or self.death_sigma <= 0:
             raise ValueError("kernel sigmas must be positive")
+        if self.kernel not in {"normal", "exponential"}:
+            raise ValueError("kernel must be either 'normal' or 'exponential'")
+        if self.kernel_variance <= 0:
+            raise ValueError("kernel_variance must be positive")
         if self.death_cull_sigmas <= 0:
             raise ValueError("death_cull_sigmas must be positive")
 
@@ -69,7 +80,8 @@ def initialize(params: SSAParams, initial_population: int) -> SSAState:
 
     if initial_population < 0:
         raise ValueError("initial_population must be non-negative")
-    backend = make_normal_ssa_1d(
+    factory = make_exponential_ssa_1d if params.kernel == "exponential" else make_normal_ssa_1d
+    backend = factory(
         M=1,
         area_len=params.length,
         birth_rates=[params.birth_rate],

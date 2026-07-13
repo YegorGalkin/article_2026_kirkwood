@@ -27,6 +27,7 @@ from kirkwood_article.sim.ssa_1d import (
     run_events,
 )
 from kirkwood_article.stats.batch_means import batch_mean, mean_and_se
+from kirkwood_article.theory.kernel_parameters import exponential_kernel_parameters
 
 DEFAULT_DATA_DIR = Path("data")
 
@@ -59,6 +60,9 @@ class AdaptiveDScalingConfig:
     competition_rate: float = 1.0
     birth_sigma: float = 1.0
     death_sigma: float = 1.0
+    kernel: str = "normal"
+    kernel_variance: float = 1.0
+    equal_birth_death_kernels: bool = True
     d_values: tuple[float, ...] = tuple(np.round(np.arange(0.0, 0.1000001, 0.01), 2))
     seed: int = 12345
     cell_count: int = 250
@@ -90,13 +94,22 @@ def mean_field_density(config: AdaptiveDScalingConfig, d_value: float) -> float:
 
 
 def _params_for_d(config: AdaptiveDScalingConfig, d_value: float, seed: int) -> SSAParams:
+    birth_sigma = config.birth_sigma
+    death_sigma = config.death_sigma
+    if config.kernel == "exponential":
+        kernel_params = exponential_kernel_parameters(config.kernel_variance)
+        birth_sigma = kernel_params.std
+        death_sigma = kernel_params.std if config.equal_birth_death_kernels else death_sigma
     return SSAParams(
         length=config.length,
         birth_rate=config.birth_rate,
         death_rate=d_value,
         competition_rate=config.competition_rate,
-        birth_sigma=config.birth_sigma,
-        death_sigma=config.death_sigma,
+        birth_sigma=birth_sigma,
+        death_sigma=death_sigma,
+        kernel=config.kernel,
+        kernel_variance=config.kernel_variance,
+        equal_birth_death_kernels=config.equal_birth_death_kernels,
         seed=seed,
         cell_count=config.cell_count,
     )
@@ -401,6 +414,9 @@ def run_d_value(
                 "batch_count": int(diagnostics["batch_count"]),
                 "look_index": int(diagnostics["look_index"]),
                 "alpha_at_look": float(diagnostics["alpha_at_look"]),
+                "kernel": config.kernel,
+                "kernel_variance": float(config.kernel_variance),
+                "equal_birth_death_kernels": bool(config.equal_birth_death_kernels),
                 "intersected": bool(intersected),
                 "restarted_lower": bool(restarted_lower),
                 "elapsed_seconds": float(elapsed),
@@ -1249,6 +1265,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_DATA_DIR / "adaptive_d_scaling")
     parser.add_argument("--seed", type=int, default=AdaptiveDScalingConfig.seed)
     parser.add_argument("--length", type=float, default=AdaptiveDScalingConfig.length)
+    parser.add_argument("--kernel", choices=("normal", "exponential"), default=AdaptiveDScalingConfig.kernel)
+    parser.add_argument("--kernel-variance", type=float, default=AdaptiveDScalingConfig.kernel_variance)
+    parser.add_argument("--unequal-birth-death-kernels", action="store_true")
     parser.add_argument("--d-min", type=float, default=0.0)
     parser.add_argument("--d-max", type=float, default=0.1)
     parser.add_argument("--d-step", type=float, default=0.01)
@@ -1271,12 +1290,22 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--triplet-posthoc-only", action="store_true")
     parser.add_argument("--triplet-dr", type=float, default=0.1)
     parser.add_argument("--triplet-r-max", type=float, default=5.0)
+    parser.add_argument("--imps-summary", type=Path, default=None)
+    parser.add_argument("--allow-kernel-mismatch", action="store_true")
     args = parser.parse_args(argv)
 
     if args.pcf_posthoc_only:
         save_pcf_posthoc_analysis(args.output_dir)
         save_pcf_grid_plot(args.output_dir)
         save_pcf_fit_parameter_plot(args.output_dir)
+        if args.imps_summary is not None:
+            from kirkwood_article.experiments.pair_analysis import save_pair_analysis_outputs
+
+            save_pair_analysis_outputs(
+                args.output_dir,
+                args.imps_summary,
+                allow_kernel_mismatch=args.allow_kernel_mismatch,
+            )
         return
 
     if args.triplet_posthoc_only:
@@ -1289,6 +1318,14 @@ def main(argv: list[str] | None = None) -> None:
     if args.summary_plot_only:
         save_summary_plot(args.output_dir, args.summary_plot)
         save_convergence_diagnostics_plot(args.output_dir, args.convergence_plot)
+        if args.imps_summary is not None:
+            from kirkwood_article.experiments.pair_analysis import save_pair_analysis_outputs
+
+            save_pair_analysis_outputs(
+                args.output_dir,
+                args.imps_summary,
+                allow_kernel_mismatch=args.allow_kernel_mismatch,
+            )
         return
 
     if args.only_d is None:
@@ -1302,6 +1339,9 @@ def main(argv: list[str] | None = None) -> None:
         length=args.length,
         d_values=d_values,
         seed=args.seed,
+        kernel=args.kernel,
+        kernel_variance=args.kernel_variance,
+        equal_birth_death_kernels=not args.unequal_birth_death_kernels,
         max_equilibration_steps=args.max_equilibration_steps,
         max_measurement_steps=args.max_measurement_steps,
         coordinate_stride=args.coordinate_stride,
@@ -1309,6 +1349,14 @@ def main(argv: list[str] | None = None) -> None:
     run_scaling_grid(config, args.output_dir)
     save_summary_plot(args.output_dir, args.summary_plot)
     save_convergence_diagnostics_plot(args.output_dir, args.convergence_plot)
+    if args.imps_summary is not None:
+        from kirkwood_article.experiments.pair_analysis import save_pair_analysis_outputs
+
+        save_pair_analysis_outputs(
+            args.output_dir,
+            args.imps_summary,
+            allow_kernel_mismatch=args.allow_kernel_mismatch,
+        )
 
 
 if __name__ == "__main__":
