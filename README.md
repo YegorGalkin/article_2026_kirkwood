@@ -101,11 +101,13 @@ uv run run-adaptive-d-scaling \
 ## iMPS pair-analysis workflow
 
 The iMPS linear-response workflow depends on PyTorch, which is kept behind the
-optional `imps` extra because it is a large dependency. Install the full
-development/iMPS environment with:
+optional `imps` extra because it is a large dependency. The repository uv
+configuration includes the `imps` dependency group by default, so
+`uv run run-imps-linear-response` has PyTorch available without passing
+`--extra imps`. Install the full development/iMPS environment with:
 
 ```bash
-uv sync --extra dev --extra imps
+uv sync --extra dev
 ```
 
 The packaged console entry points are:

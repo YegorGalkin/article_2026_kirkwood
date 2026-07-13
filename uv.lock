@@ -626,6 +626,11 @@ imps = [
     { name = "torch" },
 ]
 
+[package.dev-dependencies]
+imps = [
+    { name = "torch" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "ipykernel", marker = "extra == 'dev'", specifier = ">=6.29" },
@@ -642,6 +647,9 @@ requires-dist = [
     { name = "tqdm", specifier = ">=4.66" },
 ]
 provides-extras = ["imps", "dev"]
+
+[package.metadata.requires-dev]
+imps = [{ name = "torch", specifier = ">=2.2" }]
 
 [[package]]
 name = "kiwisolver"

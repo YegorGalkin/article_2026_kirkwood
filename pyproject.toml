@@ -27,6 +27,14 @@ dev = [
   "ipykernel>=6.29",
 ]
 
+[dependency-groups]
+imps = [
+  "torch>=2.2",
+]
+
+[tool.uv]
+default-groups = ["imps"]
+
 [project.scripts]
 run-scaling = "kirkwood_article.experiments.scaling:main"
 run-adaptive-d-scaling = "kirkwood_article.experiments.adaptive_d_scaling:main"

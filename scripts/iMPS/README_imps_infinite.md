@@ -112,10 +112,12 @@ exterior regions remain infinite for every `ell`.
 
 ## Typical run
 
-From the repository root, prefer the packaged `uv` console entry point:
+From the repository root, prefer the packaged `uv` console entry point. The
+repository uv configuration includes the `imps` dependency group by default, so
+PyTorch is present for the iMPS entry point without extra flags:
 
 ```bash
-uv sync --extra imps
+uv sync
 uv run run-imps-linear-response \
   --b 1 --gamma 1 --lam 1 \
   --a 0.25 \
